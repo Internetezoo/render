@@ -105,7 +105,6 @@ function rewriteLocationHeader(targetURL, responseHeaders, proxyDomain) {
 
 /**
  * KRITIKUS JAVÍTÁS: Base Tag visszaállítása a relatív URL-ek feloldásához (Tubi font fix).
- * document.domain semlegesítés a SecurityError elkerülésére (Roku fix).
  */
 function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const originalTargetOrigin = targetURL.origin;
@@ -123,8 +122,6 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const proxyPrefix = `https://${proxyDomain}/proxy?url=`;
 
     // --- KRITIKUS JAVÍTÁS 2: <base> tag bevezetése (Visszaállítva a CSS relatív URL-ekhez) ---
-    // A Base Tag KELL, hogy a CSS-ben lévő relatív font URL-eket a target originhez igazítsa,
-    // így a Stray Asset logikánk be tud avatkozni.
     const baseTag = `<base href="${originalTargetOrigin}/">`;
     if ($('head').length) {
         $('head').prepend(baseTag);
@@ -193,8 +190,7 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
     }
 
     // --- Statikus linkek átírása (HTML tag-ek) ---
-    // Cheerio beállítás, hogy csak az ABSZOLÚT URL-eket proxyzza (a relatívakat a Base Tag kezeli).
-
+    
     $('a, link, script, img, source, meta').each((i, element) => {
         let attribute = '';
         const tag = $(element).prop('tagName').toLowerCase();
@@ -217,20 +213,34 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
                     originalUrl = targetURL.protocol + originalUrl;
                 }
                 
-                // Csak az abszolút URL-eket írjuk át, amelyek a céloldalhoz tartoznak
+                let proxiedUrl = null;
+
+                // 1. Abszolút URL-ek (http/https)
                 if (originalUrl.startsWith('http')) {
                     try {
                         const absoluteUrl = new URL(originalUrl);
                         
-                        // Proxyzzuk az összes URL-t, ami a célhostot tartalmazza (beleértve a subdomaint is)
+                        // Proxyzzuk az összes URL-t, ami a célhostot tartalmazza
                         if (absoluteUrl.hostname.endsWith(originalTargetHost) || absoluteUrl.hostname === originalTargetHost) {
-                            const proxiedUrl = proxyPrefix + encodeURIComponent(absoluteUrl.href);
-                            $(element).attr(attribute, proxiedUrl);
+                            proxiedUrl = proxyPrefix + encodeURIComponent(absoluteUrl.href);
                         }
                     } catch (e) {
                         // Érvénytelen abszolút URL
                     }
+                    
+                // 2. Relatív URL-ek ('/', './path', 'path') - Navigációs linkekhez
+                } else if (!originalUrl.startsWith('#') && !originalUrl.startsWith('mailto:') && (tag === 'a' || tag === 'link')) { 
+                    
+                    const absoluteUrl = url.resolve(originalTargetOrigin, originalUrl);
+                    // Győződjünk meg róla, hogy a link a céloldalhoz tartozik
+                    if (absoluteUrl.startsWith(originalTargetOrigin)) {
+                        proxiedUrl = proxyPrefix + encodeURIComponent(absoluteUrl);
+                    }
                 } 
+                
+                if (proxiedUrl) {
+                    $(element).attr(attribute, proxiedUrl);
+                }
             }
         }
     });
@@ -240,8 +250,6 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
 
 /**
  * JAVÍTÁS 5: CSS tartalom átírása az URL-ek proxyzálására.
- * Különösen fontos a betűtípusokkal kapcsolatos CORS hibák megoldásához,
- * mivel azok gyakran relatív útvonalakkal vannak megadva a CSS-ben.
  */
 function rewriteCssContent(cssText, targetURL, proxyDomain) {
     const targetOrigin = targetURL.origin;
@@ -404,7 +412,8 @@ app.all('*', async (req, res) => {
                              req.path.endsWith('.js') || req.path.endsWith('.json') || 
                              req.path.endsWith('.css') || req.path.endsWith('.m3u8') || 
                              req.path.endsWith('.png') || req.path.endsWith('.ico') || req.path.endsWith('.webmanifest') ||
-                             req.path.endsWith('.woff2') || req.path.endsWith('.ttf') || req.path.endsWith('.eot'); // Fontok hozzáadva
+                             req.path.endsWith('.woff2') || req.path.endsWith('.ttf') || req.path.endsWith('.eot') || 
+                             req.path.endsWith('.jpg') || req.path.endsWith('.jpeg') || req.path.endsWith('.webp') || req.path.endsWith('.svg'); // Képek hozzáadva
 
         if (req.path !== '/proxy' && req.headers['referer'] && isStrayAsset) {
             
@@ -477,8 +486,7 @@ app.all('*', async (req, res) => {
         const contentType = newRespHeaders.get('content-type') || ''; 
         
         // JAVÍTÁS 1: Átirányítási (Location) fejlécek felülírása
-        rewriteLocationHeader(targetURL, newRespHeaders, currentProxyDomain);
-
+        rewriteLocationHeader(targetURL, newRespHeaders, currentProxyDomain); // FIGYELEM: A korábbi szintaktikai hiba itt volt!
         // KRITIKUS FEJLÉCEK TÖRLÉSE ÉS KÖTELEZŐ CORS BEÁLLÍTÁS MINDEN VÁLASZ ESETÉN! (Tubi fix)
         newRespHeaders.delete('content-encoding'); 
         newRespHeaders.delete('content-security-policy'); 
