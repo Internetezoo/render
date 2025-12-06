@@ -24,7 +24,6 @@ app.use(express.raw({ type: '*/*' }));
 
 /**
  * Átírja a HTML tartalomban lévő URL-eket a proxy domainjére és INJEKTÁLJA A JS INTERCEPTORT.
- * Ez a rész kezeli a Tubi abszolút URL-eket és a Roku relatív API hívásokat.
  */
 function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const $ = cheerio.load(html);
@@ -33,12 +32,13 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const originalTargetOrigin = targetURL.origin;
 
     // --- KRITIKUS JAVÍTÁS: Kliensoldali Hálózati Hívás Interceptor ---
+    // Elfogja a dinamikus fetch/XHR hívásokat (Tubi abszolút URL-ek és Roku relatív API hívások).
     const clientSidePatch = `
         <script>
             (function() {
                 const proxyPrefix = '${proxyPrefix}';
                 const currentProxyDomain = '${proxyDomain}';
-                const originalTargetOrigin = '${originalTargetOrigin}'; // pl. https://tubitv.com
+                const originalTargetOrigin = '${originalTargetOrigin}';
 
                 function resolveAndProxy(resource) {
                     let urlString = resource;
@@ -63,14 +63,12 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
                     return resource;
                 }
                 
-                // 1. fetch() felülírása
                 const originalFetch = window.fetch;
                 window.fetch = function(resource, options) {
                     const proxiedResource = resolveAndProxy(resource);
                     return originalFetch(proxiedResource, options);
                 };
 
-                // 2. XMLHttpRequest.open() felülírása (XHR hívások elfogása)
                 const originalXhrOpen = XMLHttpRequest.prototype.open;
                 XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
                     const proxiedUrl = resolveAndProxy(url);
@@ -103,7 +101,7 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
 
             if (originalUrl) {
                 
-                // Gyökér-relatív linkek kezelése (/path/to/asset, pl. /service-worker.js, /manifest.json)
+                // Gyökér-relatív linkek kezelése (Statically loaded assets, pl. /service-worker.js, /s/...)
                 if (originalUrl.startsWith('/') && !originalUrl.startsWith('//')) {
                     const absoluteUrl = targetURL.origin + originalUrl;
                     const proxiedUrl = `https://${proxyDomain}/proxy?url=${encodeURIComponent(absoluteUrl)}`;
@@ -111,7 +109,7 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
                     return; 
                 }
 
-                // Minden más link
+                // Abszolút linkek kezelése (Static absolute links, pl. Tubi CDN)
                 const absoluteUrl = url.resolve(targetURL.href, originalUrl);
                 
                 if (absoluteUrl.startsWith('http')) {
@@ -184,7 +182,7 @@ app.all('*', async (req, res) => {
         }
 
         // 🛑 KRITIKUS JAVÍTÁS (Agresszív Asset Átirányítás)
-        // Kezeli a Roku és Tubi Service Worker és Asset útvonalait, amelyek a proxy domainen jelennek meg.
+        // Elkapja a Render domainjén felbukkanó, hibásan feloldott Service Worker, Manifest, és egyéb asset útvonalakat.
         const isStrayPath = req.path.includes('/api/') || 
                             req.path.includes('/s/') || 
                             req.path.endsWith('.js') ||
@@ -215,7 +213,6 @@ app.all('*', async (req, res) => {
                 const correctProxyUrl = `/proxy?url=${encodeURIComponent(absoluteTargetUrl)}`;
                 
                 console.log(`REDIRECTING STRAY ASSET: ${req.path} -> ${correctProxyUrl}`);
-                // 302-es átirányítás a helyes proxy URL-re
                 return res.redirect(302, correctProxyUrl);
             }
         }
@@ -224,6 +221,7 @@ app.all('*', async (req, res) => {
         if (req.path === '/proxy' && req.query.url) {
             targetURL = new URL(req.query.url);
         } else {
+            // Ha a fenti átirányítás nem működött, és nem /proxy, akkor 404
             if (!res.headersSent) {
                 return res.status(404).send('Not Found or Invalid Proxy URL Format. Használja a /proxy?url=... formátumot.');
             }
@@ -278,9 +276,31 @@ app.all('*', async (req, res) => {
             res.setHeader('Content-Type', 'text/html; charset=utf-8'); 
             res.status(response.status).send(rewrittenHtml);
             
+        // 🛑 B) JAVASCRIPT/CSS/JSON ESET: Tartalom átírása
+        } else if (contentType.includes('javascript') || contentType.includes('css') || contentType.includes('json')) {
+             console.log(`Rewriting ${contentType} content for: ${targetURL.href}`);
+            const textContent = await response.text();
+            
+            const targetOrigin = targetURL.origin; 
+            const proxiedOrigin = `https://${currentProxyDomain}/proxy?url=${encodeURIComponent(targetOrigin)}`;
+            
+            // Agresszív cserék a JS/CSS/JSON fájlok szövegében
+            let rewrittenContent = textContent;
+
+            // 1. Roku gyökér URL-ek cseréje (ha a JS kódban szerepel)
+            if (targetURL.hostname.includes('roku.com')) {
+                rewrittenContent = rewrittenContent.replaceAll(targetOrigin, proxiedOrigin);
+            }
+
+            // 2. Tubi abszolút domainek cseréje (ha a JS kódban szerepel)
+            rewrittenContent = rewrittenContent.replaceAll('https://md0.tubitv.com', `https://${currentProxyDomain}/proxy?url=https://md0.tubitv.com`);
+            rewrittenContent = rewrittenContent.replaceAll('https://mcdn.tubitv.com', `https://${currentProxyDomain}/proxy?url=https://mcdn.tubitv.com`);
+            
+            res.setHeader('Content-Type', contentType); 
+            res.status(response.status).send(rewrittenContent);
+
         } else {
-            // B) MINDEN MÁS TARTALOM (JS, CSS, JSON, Képek)
-            // Itt minden streamelésre kerül. A dinamikus hívásokat a kliensoldali patch kezeli.
+            // C) MINDEN MÁS TARTALOM (Képek, videók, stb.) - stream
             
             res.setHeader('Content-Type', contentType); 
 
