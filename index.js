@@ -23,71 +23,10 @@ app.use(express.raw({ type: '*/*' }));
 // ===============================================
 
 /**
- * Átírja a HTML tartalomban lévő URL-eket a proxy domainjére és injektálja a JS patch-et.
+ * Átírja a HTML tartalomban lévő URL-eket a proxy domainjére.
  */
 function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const $ = cheerio.load(html);
-    
-    // A proxizott URL-hez szükséges prefix
-    const proxyPrefix = `https://${proxyDomain}/proxy?url=`;
-    
-    // Az eredeti céloldal gyökerét használjuk a JS kódhoz
-    const originalTargetOrigin = targetURL.origin;
-
-    // --- KRITIKUS JAVÍTÁS: Kliensoldali Hálózati Hívás Interceptor ---
-    // Ez a script felülírja a böngésző fetch és XHR metódusait.
-    const clientSidePatch = `
-        <script>
-            (function() {
-                const proxyPrefix = '${proxyPrefix}';
-                const currentProxyDomain = '${proxyDomain}';
-                const originalTargetOrigin = '${originalTargetOrigin}';
-
-                function resolveAndProxy(resource) {
-                    // Ha a kérés abszolút, de nem proxizott (Tubi API hívás), proxyzzuk.
-                    if (typeof resource === 'string' && resource.startsWith('http')) {
-                        if (!resource.includes(currentProxyDomain)) {
-                            // Hozzáadja a proxy?url= előtagot
-                            return proxyPrefix + encodeURIComponent(resource);
-                        }
-                        return resource;
-                    }
-                    
-                    // Ha a kérés relatív (pl. /s/1/7/... Roku asset), feloldjuk a céloldal gyökerére, majd proxyzzuk.
-                    if (typeof resource === 'string' && resource.startsWith('/')) {
-                        // Kézzel pótoljuk a hiányzó Roku címet
-                        const absoluteUrl = originalTargetOrigin + resource;
-                        // Hozzáadjuk a proxy?url= előtagot
-                        return proxyPrefix + encodeURIComponent(absoluteUrl);
-                    }
-
-                    // Minden mást (pl. relatív könyvtár, vagy nem string) hagyunk.
-                    return resource;
-                }
-                
-                // 1. fetch() felülírása
-                const originalFetch = window.fetch;
-                window.fetch = function(resource, options) {
-                    const proxiedResource = resolveAndProxy(resource);
-                    return originalFetch(proxiedResource, options);
-                };
-
-                // 2. XMLHttpRequest.open() felülírása (XHR hívások elfogása)
-                const originalXhrOpen = XMLHttpRequest.prototype.open;
-                XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
-                    const proxiedUrl = resolveAndProxy(url);
-                    originalXhrOpen.call(this, method, proxiedUrl, async, user, password);
-                };
-            })();
-        </script>
-    `;
-
-    // Injektálás a <head> elejére
-    if ($('head').length) {
-        $('head').prepend(clientSidePatch);
-    } else {
-        $('body').prepend(clientSidePatch);
-    }
     
     // --- Statikus linkek átírása (HTML tag-ek) ---
     $('a, link, script, img, source, meta').each((i, element) => {
@@ -105,7 +44,7 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
 
             if (originalUrl) {
                 
-                // Statikus gyökér-relatív linkek kezelése (/path/to/asset).
+                // 🛑 ROKU FIX #1: Gyökér-relatív linkek kezelése (/path/to/asset).
                 if (originalUrl.startsWith('/') && !originalUrl.startsWith('//')) {
                     const absoluteUrl = targetURL.origin + originalUrl;
                     const proxiedUrl = `https://${proxyDomain}/proxy?url=${encodeURIComponent(absoluteUrl)}`;
@@ -189,7 +128,6 @@ app.all('*', async (req, res) => {
         if (req.path === '/proxy' && req.query.url) {
             targetURL = new URL(req.query.url);
         } else {
-            // A kérésnek szigorúan /proxy?url=... formátumúnak kell lennie, különben 404.
             if (!res.headersSent) {
                 return res.status(404).send('Not Found or Invalid Proxy URL Format. Használja a /proxy?url=... formátumot.');
             }
@@ -203,7 +141,7 @@ app.all('*', async (req, res) => {
         const fetchOptions = {
             method: req.method,
             headers: {
-                // Fejlécek finomhangolása a 403-as hiba esélyének csökkentésére
+                // Fejlécek finomhangolása
                 'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
                 'Referer': targetURL.origin,
                 'Host': targetURL.host,
@@ -244,8 +182,38 @@ app.all('*', async (req, res) => {
             res.setHeader('Content-Type', 'text/html; charset=utf-8'); 
             res.status(response.status).send(rewrittenHtml);
             
+        // B) JAVASCRIPT/CSS ESET: Agresszív Tartalomátírás
+        } else if (contentType.includes('javascript') || contentType.includes('css')) {
+             console.log(`Rewriting ${contentType} content for: ${targetURL.href}`);
+            const textContent = await response.text();
+            
+            // Az eredeti céloldal gyökércíme (pl. https://therokuchannel.roku.com)
+            const targetOrigin = targetURL.origin; 
+            // A proxizott gyökércímünk 
+            const proxiedOrigin = `https://${currentProxyDomain}/proxy?url=${encodeURIComponent(targetOrigin)}`;
+            
+            // Agresszív cserék a JS/CSS fájlok szövegében
+            let rewrittenContent = textContent
+                // 1. Alap domain cseréje
+                .replaceAll(targetOrigin, proxiedOrigin);
+
+            // 2. Specifikus Tubi/Roku aldomainek kezelése (ha JS-ben abszolút URL-t használnak)
+            
+            // Tubi API/Asset aldomainek
+            rewrittenContent = rewrittenContent.replaceAll('https://md0.tubitv.com', `https://${currentProxyDomain}/proxy?url=https://md0.tubitv.com`);
+            rewrittenContent = rewrittenContent.replaceAll('https://account.production-public.tubi.io', `https://${currentProxyDomain}/proxy?url=https://account.production-public.tubi.io`);
+            
+            // 🛑 ROKU FIX #2: Roku aldomain cseréje JS-ben
+            if (targetURL.hostname.includes('roku.com')) {
+                // Ez kijavítja a belső, abszolút URL-eket a JS-ben.
+                rewrittenContent = rewrittenContent.replaceAll('https://therokuchannel.roku.com', proxiedOrigin);
+            }
+            
+            res.setHeader('Content-Type', contentType); 
+            res.status(response.status).send(rewrittenContent);
+
         } else {
-            // B) MINDEN MÁS TARTALOM (JS, JSON, CSS, Képek)
+            // C) MINDEN MÁS TARTALOM (JSON, Képek)
             
             res.setHeader('Content-Type', contentType); 
 
