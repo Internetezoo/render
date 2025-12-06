@@ -28,9 +28,7 @@ app.use(express.raw({ type: '*/*' }));
 function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const $ = cheerio.load(html);
     
-    // --- <base> tag eltávolítva. ---
-
-    // Létrehozott/statikus linkek átírása
+    // --- Létrehozott/statikus linkek átírása ---
     $('a, link, script, img, source, meta').each((i, element) => {
         let attribute = '';
         if (element.tagName === 'a' || element.tagName === 'link') {
@@ -47,11 +45,12 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
             if (originalUrl) {
                 
                 // Gyökér-relatív linkek kezelése (/path/to/asset).
+                // Mivel a JS generálja a rossz linket, a HTML átírás a legfőbb esélyünk.
                 if (originalUrl.startsWith('/') && !originalUrl.startsWith('//')) {
                     // Az abszolút URL: a céloldal gyökére + a relatív elérési út
                     const absoluteUrl = targetURL.origin + originalUrl;
                     
-                    // A proxizott URL (https://proxy.com/proxy?url=https://target.com/path)
+                    // A proxizott URL 
                     const proxiedUrl = `https://${proxyDomain}/proxy?url=${encodeURIComponent(absoluteUrl)}`;
                     $(element).attr(attribute, proxiedUrl);
                     return; 
@@ -72,7 +71,7 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
 }
 
 /**
- * Generálja az egyszerű kezdőoldalt. (Elhagyva az egyszerűség kedvéért a korábbi kód)
+ * Generálja az egyszerű kezdőoldalt.
  */
 function getHomePage(proxyDomain) {
     return `
@@ -128,44 +127,13 @@ app.all('*', async (req, res) => {
         if (req.path === '/' && !req.query.url) {
             return res.status(200).type('text/html').send(getHomePage(currentProxyDomain));
         }
-        
-        // --- KRITIKUS JAVÍTÁS: Hibásan generált gyökér-relatív asset kérések elfogása ---
-        // Ha a kérés nem tartalmaz /proxy?url=... paramétert, de egy assetre utal (pl. /s/...), 
-        // megpróbáljuk a Referer fejléc alapján átirányítani a helyes proxy formátumra.
-        if (req.path !== '/proxy' && req.headers['referer'] && (req.path.endsWith('.js') || req.path.endsWith('.css') || req.path.includes('/s/'))) {
-            
-            const referrer = req.headers['referer'];
-            let assumedTargetOrigin = ''; 
-
-            try {
-                const referrerUrl = new URL(referrer);
-                // Ha a hivatkozó a mi proxy oldalunk
-                if (referrerUrl.hostname === currentProxyDomain) {
-                    const originalUrlParam = referrerUrl.searchParams.get('url');
-                    if (originalUrlParam) {
-                        // Kivonjuk belőle a céloldal gyökér URL-jét
-                        const originalUrl = new URL(originalUrlParam);
-                        assumedTargetOrigin = originalUrl.origin;
-                    }
-                }
-            } catch(e) { /* Hiba esetén figyelmen kívül hagyjuk */ }
-            
-            if (assumedTargetOrigin) {
-                const absoluteTargetUrl = assumedTargetOrigin + req.path;
-                const correctProxyUrl = `/proxy?url=${encodeURIComponent(absoluteTargetUrl)}`;
-                
-                console.log(`REDIRECTING HIBÁS ASSET KÉRÉS: ${req.path} -> ${correctProxyUrl}`);
-                return res.redirect(302, correctProxyUrl);
-            }
-        }
-        // --- VÉGE: Hibásan generált asset kérések elfogása ---
-
 
         // B) A fő proxy logika: /proxy?url=...
         if (req.path === '/proxy' && req.query.url) {
             targetURL = new URL(req.query.url);
         } else {
-            // Nem értelmezhető útvonal (404-et ad vissza)
+            // Ez a logikai blokk a korábbi, Referer-alapú hibás link javítás helyett került ide.
+            // A kérésnek szigorúan /proxy?url=... formátumúnak kell lennie, különben 404.
             if (!res.headersSent) {
                 return res.status(404).send('Not Found or Invalid Proxy URL Format. Használja a /proxy?url=... formátumot.');
             }
@@ -199,7 +167,7 @@ app.all('*', async (req, res) => {
         const contentType = newRespHeaders.get('content-type') || ''; 
 
         // KRITIKUS FEJLÉC TÖRLÉSEK: Ezeket MINDEN válasz esetén törölni kell!
-        newRespHeaders.delete('content-encoding'); 
+        newRespHeaders.delete('content-encoding'); // JAVÍTJA A net::ERR_CONTENT_DECODING_FAILED HIBÁT
         newRespHeaders.delete('content-security-policy'); 
         newRespHeaders.delete('x-frame-options');
         newRespHeaders.delete('x-content-type-options'); 
@@ -223,8 +191,25 @@ app.all('*', async (req, res) => {
             res.setHeader('Content-Type', 'text/html; charset=utf-8'); 
             res.status(response.status).send(rewrittenHtml);
             
+        // B) JAVASCRIPT ESET: Tartalom átírása
+        } else if (contentType.includes('javascript')) {
+             console.log(`Rewriting JavaScript content for: ${targetURL.href}`);
+            const jsText = await response.text();
+            
+            // Az eredeti céloldal gyökércíme (pl. https://therokuchannel.roku.com)
+            const targetOrigin = targetURL.origin; 
+            // A mi proxizott gyökércímünk (pl. https://render-bj2x.onrender.com/proxy?url=https://therokuchannel.roku.com)
+            const proxiedOrigin = `https://${currentProxyDomain}/proxy?url=${encodeURIComponent(targetOrigin)}`;
+            
+            // Agresszív csere a JavaScript fájl szövegében
+            // Cseréljük az eredeti domain gyökér URL-jét a proxizott gyökér URL-re
+            const rewrittenJs = jsText.replaceAll(targetOrigin, proxiedOrigin);
+
+            res.setHeader('Content-Type', contentType); 
+            res.status(response.status).send(rewrittenJs);
+
         } else {
-            // B) MINDEN MÁS TARTALOM (JSON, CSS, JS, Képek)
+            // C) MINDEN MÁS TARTALOM (JSON, CSS, Képek)
             
             res.setHeader('Content-Type', contentType); 
 
