@@ -1,14 +1,18 @@
 {
   "name": "render-simple-proxy",
   "version": "1.0.0",
-  "description": "Simple web proxy for Render.com using Express and Cheerio.",
+  "description": "Simple Web Proxy with URL Rewriting",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "node-fetch": "^2.6.9", 
-    "cheerio": "^1.0.0-rc.12"
+    "cheerio": "^1.0.0-rc.12",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
