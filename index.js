@@ -1,4 +1,4 @@
-// index.js - Végleges, stabil Node.js/Express Proxy Service
+// index.js - Végleges, stabil Node.js/Express Proxy Service (Javított verzió)
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -13,7 +13,6 @@ const PORT = process.env.PORT || 3000;
 // 1. KONFIGURÁCIÓ ÉS ÁLLANDÓK
 // ===============================================
 
-// KRITIKUS: A render.com használata esetén a protokoll automatikusan HTTPS-nek tekintendő.
 const currentProxyDomain = process.env.PROXY_DOMAIN || 'render-bj2x.onrender.com'; 
 const MAX_BODY_SIZE = '50mb';
 const STANDARD_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -44,8 +43,7 @@ app.use(express.raw({ type: '*/*', limit: MAX_BODY_SIZE }));
 // ===============================================
 
 /**
- * JAVÍTÁS 4: Megszűri a proxy felé érkező request headereket,
- * és eltávolítja a problémás Referer fejlécet, majd helyette a céloldal Originjét küldi.
+ * JAVÍTÁS 4: Megszűri a proxy felé érkező request headereket.
  */
 function filterRequestHeaders(originalHeaders, targetURL) {
     const newHeaders = {};
@@ -106,7 +104,8 @@ function rewriteLocationHeader(targetURL, responseHeaders, proxyDomain) {
 // ===============================================
 
 /**
- * KRITIKUS JAVÍTÁS: Kezeli a document.domain problémát (Roku) és stabilizálja az URL átírást.
+ * KRITIKUS JAVÍTÁS: Base Tag visszaállítása a relatív URL-ek feloldásához (Tubi font fix).
+ * document.domain semlegesítés a SecurityError elkerülésére (Roku fix).
  */
 function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const originalTargetOrigin = targetURL.origin;
@@ -119,13 +118,13 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
         return '/* document.domain beállítás letiltva a proxy által a SecurityError elkerülésére */';
     });
     
-    // Ujra betöltjük a cheerio-ba a document.domain patch után
     const $ = cheerio.load(patchedHtml);
 
     const proxyPrefix = `https://${proxyDomain}/proxy?url=`;
 
-    // --- KRITIKUS JAVÍTÁS 2: <base> tag bevezetése ---
-    // Ez automatikusan kezeli a legtöbb relatív URL-t.
+    // --- KRITIKUS JAVÍTÁS 2: <base> tag bevezetése (Visszaállítva a CSS relatív URL-ekhez) ---
+    // A Base Tag KELL, hogy a CSS-ben lévő relatív font URL-eket a target originhez igazítsa,
+    // így a Stray Asset logikánk be tud avatkozni.
     const baseTag = `<base href="${originalTargetOrigin}/">`;
     if ($('head').length) {
         $('head').prepend(baseTag);
@@ -134,7 +133,6 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
     }
     
     // --- KRITIKUS JAVÍTÁS 3: Kliensoldali Hálózati Hívás Interceptor ---
-    // A Base tag miatt az interceptor csak az ABSZOLÚT URL-eket kezeli, amelyek a céloldalhoz tartoznak.
     const clientSidePatch = `
         <script>
             // Proxy Interceptor Script - Dinamikus hívások átirányítása
@@ -149,23 +147,21 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
                         return resource;
                     }
                     
-                    // Ha már proxyzva van, ne írjuk át újra
                     if (urlString.includes(currentProxyHost)) {
                         return urlString;
                     }
                     
-                    // Abszolút URL-ek kezelése (ha a céloldalhoz tartozik)
-                    // Az URL konstruktor használata a relatív/abszolút feloldásra, de a Base Tag már segített
+                    let absoluteUrl;
                     try {
-                        // A Base Tag miatt a relatív URL-ek már abszolútként viselkednek, 
-                        // így csak az abszolút hívásokat kell átírni, amelyek a célhostot tartalmazzák.
-                        const u = new URL(urlString, document.baseURI);
-                        
-                        if (u.hostname === originalTargetHost && u.protocol.startsWith('http')) {
-                            return proxyPrefix + encodeURIComponent(u.href);
-                        }
+                        // Új URL() használata a Base Tag által beállított document.baseURI-vel
+                        absoluteUrl = new URL(urlString, document.baseURI);
                     } catch (e) {
-                        // Nem érvényes URL, hagyjuk figyelmen kívül
+                        return resource; 
+                    }
+
+                    // Proxyzzuk az összes URL-t, ami a céloldalhoz vagy annak aldoménjéhez tartozik
+                    if (absoluteUrl.hostname.endsWith(originalTargetHost) || absoluteUrl.hostname === originalTargetHost) {
+                        return proxyPrefix + encodeURIComponent(absoluteUrl.href);
                     }
                     
                     return resource;
@@ -197,11 +193,13 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
     }
 
     // --- Statikus linkek átírása (HTML tag-ek) ---
-    // A <base> tag bevezetése után már csak az abszolút URL-eket és a protokoll-relatív URL-eket kell átírni.
+    // Cheerio beállítás, hogy csak az ABSZOLÚT URL-eket proxyzza (a relatívakat a Base Tag kezeli).
+
     $('a, link, script, img, source, meta').each((i, element) => {
         let attribute = '';
         const tag = $(element).prop('tagName').toLowerCase();
 
+        // Attribute meghatározása
         if (tag === 'a' || tag === 'link' || $(element).attr('rel') === 'canonical') {
             attribute = 'href';
         } else if (tag === 'script' || tag === 'img' || tag === 'source') {
@@ -220,26 +218,28 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
                 }
                 
                 // Csak az abszolút URL-eket írjuk át, amelyek a céloldalhoz tartoznak
-                try {
-                    const absoluteUrl = new URL(originalUrl, originalTargetOrigin);
-                    
-                    if (absoluteUrl.hostname === originalTargetHost && absoluteUrl.protocol.startsWith('http')) {
-                        const proxiedUrl = proxyPrefix + encodeURIComponent(absoluteUrl.href);
-                        $(element).attr(attribute, proxiedUrl);
+                if (originalUrl.startsWith('http')) {
+                    try {
+                        const absoluteUrl = new URL(originalUrl);
+                        
+                        // Proxyzzuk az összes URL-t, ami a célhostot tartalmazza (beleértve a subdomaint is)
+                        if (absoluteUrl.hostname.endsWith(originalTargetHost) || absoluteUrl.hostname === originalTargetHost) {
+                            const proxiedUrl = proxyPrefix + encodeURIComponent(absoluteUrl.href);
+                            $(element).attr(attribute, proxiedUrl);
+                        }
+                    } catch (e) {
+                        // Érvénytelen abszolút URL
                     }
-                } catch (e) {
-                    // Nem érvényes URL, vagy a base tag kezeli
-                }
+                } 
             }
         }
     });
-
 
     return $.html();
 }
 
 /**
- * JAVÍTÁS 3: A kezdőlap stílusainak módosítása (szélesebb mező, nagyobb gomb).
+ * JAVÍTÁS 3: A kezdőlap stílusainak módosítása.
  */
 function getHomePage(proxyDomain) {
     return `
@@ -339,7 +339,8 @@ app.all('*', async (req, res) => {
         const isStrayAsset = req.path.includes('/api/') || req.path.includes('/s/') || req.path.includes('/v1/') ||
                              req.path.endsWith('.js') || req.path.endsWith('.json') || 
                              req.path.endsWith('.css') || req.path.endsWith('.m3u8') || 
-                             req.path.endsWith('.png') || req.path.endsWith('.ico') || req.path.endsWith('.webmanifest'); 
+                             req.path.endsWith('.png') || req.path.endsWith('.ico') || req.path.endsWith('.webmanifest') ||
+                             req.path.endsWith('.woff2') || req.path.endsWith('.ttf') || req.path.endsWith('.eot'); // Fontok hozzáadva
 
         if (req.path !== '/proxy' && req.headers['referer'] && isStrayAsset) {
             
@@ -421,6 +422,7 @@ app.all('*', async (req, res) => {
         newRespHeaders.delete('x-content-type-options'); 
         newRespHeaders.delete('x-render-origin-server');
         newRespHeaders.delete('x-powered-by');
+        // KÖTELEZŐ CORS: Minden válasznál engedélyezzük.
         newRespHeaders.set('access-control-allow-origin', '*'); 
 
         // Fejlécek továbbítása
