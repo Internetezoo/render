@@ -23,12 +23,65 @@ app.use(express.raw({ type: '*/*' }));
 // ===============================================
 
 /**
- * Átírja a HTML tartalomban lévő URL-eket a proxy domainjére.
+ * Átírja a HTML tartalomban lévő URL-eket a proxy domainjére és injektálja a JS patch-et.
  */
 function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const $ = cheerio.load(html);
     
-    // --- Létrehozott/statikus linkek átírása ---
+    // A proxizott URL-hez szükséges prefix
+    const proxyPrefix = `https://${proxyDomain}/proxy?url=`;
+
+    // --- KRITIKUS JAVÍTÁS: Kliensoldali JS hálózati hívás interceptor injektálása ---
+    const clientSidePatch = `
+        <script>
+            (function() {
+                const proxyPrefix = '${proxyPrefix}';
+                const currentProxyDomain = '${proxyDomain}';
+                
+                // 1. fetch() felülírása
+                const originalFetch = window.fetch;
+                window.fetch = function(resource, options) {
+                    let proxiedResource = resource;
+                    
+                    if (typeof resource === 'string' && 
+                        resource.startsWith('http') && 
+                        !resource.includes(currentProxyDomain)
+                    ) {
+                        // Átírjuk az abszolút URL-eket a proxy formátumra
+                        proxiedResource = proxyPrefix + encodeURIComponent(resource);
+                    }
+                    // A gyökér-relatív URL-eket a <base> tag vagy a statikus átírás kezeli.
+                    
+                    return originalFetch(proxiedResource, options);
+                };
+
+                // 2. XMLHttpRequest.open() felülírása (XHR hívások elfogása)
+                const originalXhrOpen = XMLHttpRequest.prototype.open;
+                XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
+                    let proxiedUrl = url;
+
+                    if (typeof url === 'string' && 
+                        url.startsWith('http') && 
+                        !url.includes(currentProxyDomain)
+                    ) {
+                        // Átírjuk az abszolút URL-eket a proxy formátumra
+                        proxiedUrl = proxyPrefix + encodeURIComponent(url);
+                    }
+                    
+                    originalXhrOpen.call(this, method, proxiedUrl, async, user, password);
+                };
+            })();
+        </script>
+    `;
+
+    // Injektálás a <head> elejére
+    if ($('head').length) {
+        $('head').prepend(clientSidePatch);
+    } else {
+        $('body').prepend(clientSidePatch);
+    }
+    
+    // --- Statikus linkek átírása (marad az eredeti logika) ---
     $('a, link, script, img, source, meta').each((i, element) => {
         let attribute = '';
         if (element.tagName === 'a' || element.tagName === 'link') {
@@ -45,18 +98,14 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
             if (originalUrl) {
                 
                 // Gyökér-relatív linkek kezelése (/path/to/asset).
-                // Mivel a JS generálja a rossz linket, a HTML átírás a legfőbb esélyünk.
                 if (originalUrl.startsWith('/') && !originalUrl.startsWith('//')) {
-                    // Az abszolút URL: a céloldal gyökére + a relatív elérési út
                     const absoluteUrl = targetURL.origin + originalUrl;
-                    
-                    // A proxizott URL 
                     const proxiedUrl = `https://${proxyDomain}/proxy?url=${encodeURIComponent(absoluteUrl)}`;
                     $(element).attr(attribute, proxiedUrl);
                     return; 
                 }
 
-                // EREDETI LOGIKA: Minden más link (teljes URL-ek, relatív linkek)
+                // Minden más link
                 const absoluteUrl = url.resolve(targetURL.href, originalUrl);
                 
                 if (absoluteUrl.startsWith('http')) {
@@ -132,7 +181,6 @@ app.all('*', async (req, res) => {
         if (req.path === '/proxy' && req.query.url) {
             targetURL = new URL(req.query.url);
         } else {
-            // Ez a logikai blokk a korábbi, Referer-alapú hibás link javítás helyett került ide.
             // A kérésnek szigorúan /proxy?url=... formátumúnak kell lennie, különben 404.
             if (!res.headersSent) {
                 return res.status(404).send('Not Found or Invalid Proxy URL Format. Használja a /proxy?url=... formátumot.');
@@ -144,11 +192,9 @@ app.all('*', async (req, res) => {
 
         // --- PROXY KÉRÉS ELKÜLDÉSE (fetch) ---
         
-        // Kérés fejlécek beállítása a 403-as hiba esélyének csökkentésére
         const fetchOptions = {
             method: req.method,
             headers: {
-                // Részletes User-Agent a blokkolás elkerülésére
                 'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
                 'Referer': targetURL.origin,
                 'Host': targetURL.host,
@@ -166,8 +212,8 @@ app.all('*', async (req, res) => {
         const newRespHeaders = new Headers(response.headers);
         const contentType = newRespHeaders.get('content-type') || ''; 
 
-        // KRITIKUS FEJLÉC TÖRLÉSEK: Ezeket MINDEN válasz esetén törölni kell!
-        newRespHeaders.delete('content-encoding'); // JAVÍTJA A net::ERR_CONTENT_DECODING_FAILED HIBÁT
+        // KRITIKUS FEJLÉCEK TÖRLÉSE MINDEN VÁLASZ ESETÉN!
+        newRespHeaders.delete('content-encoding'); 
         newRespHeaders.delete('content-security-policy'); 
         newRespHeaders.delete('x-frame-options');
         newRespHeaders.delete('x-content-type-options'); 
@@ -175,7 +221,6 @@ app.all('*', async (req, res) => {
 
         // Minden más fejléceket másolunk
         newRespHeaders.forEach((value, name) => {
-            // Elkerüljük a Content-Length és Content-Encoding másolását
             if (name.toLowerCase() !== 'content-length' && name.toLowerCase() !== 'content-encoding') { 
                 res.setHeader(name, value);
             }
@@ -187,29 +232,12 @@ app.all('*', async (req, res) => {
             const htmlText = await response.text();
             const rewrittenHtml = rewriteHtmlContent(htmlText, targetURL, currentProxyDomain);
             
-            // Biztosítjuk a helyes Content-Type fejlécet
             res.setHeader('Content-Type', 'text/html; charset=utf-8'); 
             res.status(response.status).send(rewrittenHtml);
             
-        // B) JAVASCRIPT ESET: Tartalom átírása
-        } else if (contentType.includes('javascript')) {
-             console.log(`Rewriting JavaScript content for: ${targetURL.href}`);
-            const jsText = await response.text();
-            
-            // Az eredeti céloldal gyökércíme (pl. https://therokuchannel.roku.com)
-            const targetOrigin = targetURL.origin; 
-            // A mi proxizott gyökércímünk (pl. https://render-bj2x.onrender.com/proxy?url=https://therokuchannel.roku.com)
-            const proxiedOrigin = `https://${currentProxyDomain}/proxy?url=${encodeURIComponent(targetOrigin)}`;
-            
-            // Agresszív csere a JavaScript fájl szövegében
-            // Cseréljük az eredeti domain gyökér URL-jét a proxizott gyökér URL-re
-            const rewrittenJs = jsText.replaceAll(targetOrigin, proxiedOrigin);
-
-            res.setHeader('Content-Type', contentType); 
-            res.status(response.status).send(rewrittenJs);
-
         } else {
-            // C) MINDEN MÁS TARTALOM (JSON, CSS, Képek)
+            // B) MINDEN MÁS TARTALOM (JS, JSON, CSS, Képek)
+            // A JS tartalom átírását a kliensoldali patch miatt elhagytuk, a streamelés marad.
             
             res.setHeader('Content-Type', contentType); 
 
@@ -228,7 +256,7 @@ app.all('*', async (req, res) => {
         }
 
     } catch (error) {
-        // Globális Hiba Kezelés (bármilyen váratlan hiba a try blokkban)
+        // Globális Hiba Kezelés 
         console.error(`PROXY CRITICAL ERROR for ${req.url}:`, error.message);
         
         if (!res.headersSent) {
