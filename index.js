@@ -6,7 +6,7 @@ const cheerio = require('cheerio');
 const url = require('url');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.process.env.PORT || 3000;
 
 // ===============================================
 // 1. KONFIGURÁCIÓ
@@ -27,7 +27,23 @@ app.use(express.raw({ type: '*/*' }));
  */
 function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const $ = cheerio.load(html);
+    
+    // --- KRITIKUS JAVÍTÁS: <base> tag injektálása ---
+    // Ez biztosítja, hogy a JavaScript által dinamikusan generált gyökér-relatív linkek
+    // (/s/1/7/...) is a proxy szerverre mutassanak!
 
+    // A proxizott céloldal gyökér URL-je: /proxy?url=https://targetdomain.com/
+    // A záró / karakter fontos a gyökér-relatív linkek helyes feloldásához!
+    const proxiedTargetOrigin = `/proxy?url=${encodeURIComponent(targetURL.origin)}/`;
+    
+    if ($('head').length) {
+        $('head').prepend(`<base href="${proxiedTargetOrigin}">`);
+    } else {
+        // Ha nincs <head> (pl. hibás HTML), beszúrjuk a <body> elé
+        $('body').prepend(`<base href="${proxiedTargetOrigin}">`);
+    }
+    
+    // --- Létrehozott/statikus linkek átírása ---
     // Keresünk linkeket, scripteket, képeket, stb.
     $('a, link, script, img, source, meta').each((i, element) => {
         let attribute = '';
@@ -133,7 +149,7 @@ app.all('*', async (req, res) => {
         const fetchOptions = {
             method: req.method,
             headers: {
-                // Részletes User-Agent használata a blokkolás elkerülésére
+                // Részletes User-Agent a blokkolás elkerülésére
                 'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
                 'Referer': targetURL.origin,
                 'Host': targetURL.host,
