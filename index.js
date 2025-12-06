@@ -6,7 +6,8 @@ const cheerio = require('cheerio');
 const url = require('url');
 
 const app = express();
-const PORT = process.env.process.env.PORT || 3000;
+// process.env.PORT lehet, hogy két process.env-t tartalmazott, javítva:
+const PORT = process.env.PORT || 3000; 
 
 // ===============================================
 // 1. KONFIGURÁCIÓ
@@ -28,13 +29,12 @@ app.use(express.raw({ type: '*/*' }));
 function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const $ = cheerio.load(html);
     
-    // --- KRITIKUS JAVÍTÁS: <base> tag injektálása ---
+    // --- KRITIKUS JAVÍTÁS: ABSZOLÚT <base> tag injektálása ---
     // Ez biztosítja, hogy a JavaScript által dinamikusan generált gyökér-relatív linkek
-    // (/s/1/7/...) is a proxy szerverre mutassanak!
+    // (pl. /s/1/7/...) is a proxy szerver ABSZOLÚT címére mutassanak!
 
-    // A proxizott céloldal gyökér URL-je: /proxy?url=https://targetdomain.com/
-    // A záró / karakter fontos a gyökér-relatív linkek helyes feloldásához!
-    const proxiedTargetOrigin = `/proxy?url=${encodeURIComponent(targetURL.origin)}/`;
+    // A proxizott céloldal ABSZOLÚT gyökér URL-je: https://render-bj2x.onrender.com/proxy?url=https://targetdomain.com/
+    const proxiedTargetOrigin = `https://${proxyDomain}/proxy?url=${encodeURIComponent(targetURL.origin)}/`;
     
     if ($('head').length) {
         $('head').prepend(`<base href="${proxiedTargetOrigin}">`);
@@ -59,6 +59,7 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
             let originalUrl = $(element).attr(attribute);
 
             if (originalUrl) {
+                // Átalakítjuk abszolút URL-re, ha relatív
                 const absoluteUrl = url.resolve(targetURL.href, originalUrl);
                 
                 if (absoluteUrl.startsWith('http')) {
