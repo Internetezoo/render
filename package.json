@@ -2,7 +2,7 @@
   "name": "render-simple-proxy",
   "version": "1.0.0",
   "description": "Simple web proxy for Render.com using Express and Cheerio.",
-  "main": "index.js",
+  "main": "node index.js",
   "scripts": {
     "start": "node index.js"
   },
