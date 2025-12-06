@@ -1,4 +1,4 @@
-// index.js - Végleges, stabil Node.js/Express Proxy Service (Javított Tubi 400 és Roku Redirect fix-szel)
+// index.js - Végleges, stabil Node.js/Express Proxy Service
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -17,7 +17,6 @@ const currentProxyDomain = process.env.PROXY_DOMAIN || 'render-bj2x.onrender.com
 const MAX_BODY_SIZE = '50mb';
 const STANDARD_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
-// Proxy azonosító headerek, amiket el kell távolítani a 403-as hiba elkerülésére (Render, Express, stb.)
 const PROXY_HEADERS_TO_STRIP = [
     'x-powered-by', 'x-render-origin-server', 'via', 'connection', 
     'accept-encoding', 'forwarded', 'cf-connecting-ip', 
@@ -25,7 +24,6 @@ const PROXY_HEADERS_TO_STRIP = [
     'x-forwarded-port', 'transfer-encoding' 
 ];
 
-// Tubi Autentikációs headerek, amik 400 hibát okoznak, és el kell távolítani
 const TUBI_AUTH_HEADERS_TO_STRIP = [
     'x-tubi-algorithm', 'x-tubi-date', 'x-tubi-expires',
     'x-tubi-signedheaders', 'x-tubi-signature'
@@ -44,10 +42,6 @@ app.use(express.raw({ type: '*/*', limit: MAX_BODY_SIZE }));
 // 2. KRITIKUS FEJLÉC SZŰRŐ ÉS JAVÍTÓ FUNKCIÓK
 // ===============================================
 
-/**
- * Szűri a bejövő headereket, eltávolítva a blokkolt biztonsági és
- * a proxy használatára utaló headereket.
- */
 function filterRequestHeaders(originalHeaders, targetHost) {
     const newHeaders = {};
     const lowerCaseHeadersToStrip = ALL_HEADERS_TO_STRIP.map(h => h.toLowerCase());
@@ -76,12 +70,10 @@ function filterRequestHeaders(originalHeaders, targetHost) {
 function rewriteLocationHeader(targetURL, responseHeaders, proxyDomain) {
     const locationHeader = responseHeaders.get('location');
     if (locationHeader) {
-        // Ellenőrizzük, hogy az átirányítás a cél domainre (vagy relatív útvonalra) mutat-e
         const isRelative = !locationHeader.startsWith('http');
         const isTargetHost = locationHeader.includes(targetURL.host);
 
         if (isRelative || isTargetHost) {
-            // A location.resolve a relatív/abszolút útvonalakat is helyesen kezeli
             const absoluteUrl = url.resolve(targetURL.href, locationHeader);
             const proxiedUrl = `/proxy?url=${encodeURIComponent(absoluteUrl)}`;
             
@@ -97,33 +89,26 @@ function rewriteLocationHeader(targetURL, responseHeaders, proxyDomain) {
 // 3. HTML TARTALOM ÁTÍRÓ ÉS INJEKTOR
 // ===============================================
 
-/**
- * Átírja a HTML tartalomban lévő URL-eket a proxy domainjére és INJEKTÁLJA A JS INTERCEPTORT.
- */
 function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const $ = cheerio.load(html);
     
     const proxyPrefix = `https://${proxyDomain}/proxy?url=`;
     const originalTargetOrigin = targetURL.origin;
+    const originalTargetHost = targetURL.host; // Hozzáadva a kliensoldali scriptekhez
+    const isRoku = originalTargetHost.includes('roku.com'); // Roku ellenőrzése
 
     // --- KRITIKUS JAVÍTÁS: Kliensoldali Hálózati Hívás Interceptor ---
     const clientSidePatch = `
         <script>
             // Proxy Interceptor Script - Dinamikus hívások átirányítása
             (function() {
-                // ROKU FIX 1: Eltávolítjuk a document.domain hozzárendeléseket a SecurityError elkerülése érdekében
-                try {
-                    // Megkerüljük a document.domain beállítást
-                    const domainRegex = /document\\.domain\\s*=\\s*['"].*?['"]/g;
-                    if (document.documentElement && document.documentElement.innerHTML) {
-                        document.documentElement.innerHTML = document.documentElement.innerHTML.replace(domainRegex, '/* document.domain assignment removed by proxy */');
-                    }
-                } catch (e) {
-                    console.error("Proxy: document.domain removal failed", e);
-                }
+                const isRokuChannel = ${isRoku}; // Megtartjuk a Roku domain ellenőrzését
+                
+                // ** JAVÍTÁS 2: Eltávolítottuk a document.domain agresszív, string-alapú cseréjét, **
+                // ** ami valószínűleg a Tubi fehér oldalát okozta. **
 
                 const currentProxyDomain = '${proxyDomain}';
-                const originalTargetHost = '${targetURL.host}';
+                const originalTargetHost = '${originalTargetHost}';
                 const proxyPrefix = '${proxyPrefix}';
 
 
@@ -176,7 +161,8 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
     
     // --- Statikus linkek átírása (HTML tag-ek) ---
     $('a, link, script, img, source, meta').each((i, element) => {
-        let attribute = '';
+        // ... (A statikus linkek átírása változatlan maradt) ...
+        let attribute = '';
         if (element.tagName === 'a' || element.tagName === 'link') {
             attribute = 'href';
         } else if (element.tagName === 'script' || element.tagName === 'img' || element.tagName === 'source') {
@@ -189,7 +175,6 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
             let originalUrl = $(element).attr(attribute);
 
             if (originalUrl) {
-                
                 if (originalUrl.startsWith('/') && !originalUrl.startsWith('//')) {
                     const absoluteUrl = targetURL.origin + originalUrl;
                     const proxiedUrl = proxyPrefix + encodeURIComponent(absoluteUrl);
@@ -210,8 +195,10 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
     return $.html();
 }
 
+/**
+ * JAVÍTÁS 3: A kezdőlap stílusainak módosítása (szélesebb mező, nagyobb gomb).
+ */
 function getHomePage(proxyDomain) {
-    // A kezdőoldal logikája változatlan
     return `
         <!DOCTYPE html>
         <html lang="hu">
@@ -223,8 +210,25 @@ function getHomePage(proxyDomain) {
                 body { font-family: sans-serif; margin: 50px; background: #f4f4f4; }
                 h1 { color: #333; }
                 form { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
-                input[type="text"] { width: 80%; padding: 10px; margin-right: 10px; border: 1px solid #ccc; border-radius: 4px; }
-                button { padding: 10px 15px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+                /* JAVÍTOTT STÍLUSOK */
+                input[type="text"] { 
+                    width: 400px; 
+                    max-width: 80%; 
+                    padding: 12px; 
+                    margin-right: 10px; 
+                    border: 1px solid #ccc; 
+                    border-radius: 4px; 
+                    font-size: 16px; 
+                }
+                button { 
+                    padding: 12px 20px; 
+                    background: #007bff; 
+                    color: white; 
+                    border: none; 
+                    border-radius: 4px; 
+                    cursor: pointer; 
+                    font-size: 16px; 
+                }
                 button:hover { background: #0056b3; }
                 p.info { margin-top: 20px; font-size: 0.9em; color: #666; }
             </style>
@@ -267,7 +271,8 @@ app.all('*', async (req, res) => {
         }
 
         // B) Stray Asset Átirányítás (FIX android-chrome-144x144.png 404-re)
-        const isStrayAsset = req.path.includes('/api/') || req.path.includes('/s/') || req.path.includes('/v1/') ||
+        // ... (ez a rész változatlan maradt) ...
+        const isStrayAsset = req.path.includes('/api/') || req.path.includes('/s/') || req.path.includes('/v1/') ||
                              req.path.endsWith('.js') || req.path.endsWith('.json') || 
                              req.path.endsWith('.css') || req.path.endsWith('.m3u8') || 
                              req.path.endsWith('.png') || req.path.endsWith('.ico') || req.path.endsWith('.webmanifest'); 
@@ -302,7 +307,6 @@ app.all('*', async (req, res) => {
             let fullTargetUrl = req.query.url;
             const proxyQueryKeys = Object.keys(req.query).filter(key => key !== 'url');
 
-            // KRITIKUS JAVÍTÁS (V4): Hozzáadjuk a proxyhoz küldött, de a céloldalnak szánt extra query paramétereket (pl. Tubi auth)
             if (proxyQueryKeys.length > 0) {
                 const extraParams = new URLSearchParams();
                 proxyQueryKeys.forEach(key => {
@@ -331,7 +335,7 @@ app.all('*', async (req, res) => {
             method: req.method,
             headers: fetchHeaders,
             body: ['GET', 'HEAD'].includes(req.method) ? undefined : req.body,
-            redirect: 'manual', // Fontos: manuálisan kell kezelni az átirányításokat a Location fejlécben
+            redirect: 'manual', 
             timeout: 15000 
         };
         
@@ -342,8 +346,7 @@ app.all('*', async (req, res) => {
         const newRespHeaders = new Headers(response.headers);
         const contentType = newRespHeaders.get('content-type') || ''; 
         
-        // ** JAVÍTÁS 1: Átirányítási (Location) fejlécek felülírása **
-        // Ha van átirányítás, a böngésző visszatér a proxyhoz
+        // JAVÍTÁS 1: Átirányítási (Location) fejlécek felülírása
         rewriteLocationHeader(targetURL, newRespHeaders, currentProxyDomain);
 
         // KRITIKUS FEJLÉCEK TÖRLÉSE ÉS KÖTELEZŐ CORS BEÁLLÍTÁS MINDEN VÁLASZ ESETÉN!
@@ -373,13 +376,11 @@ app.all('*', async (req, res) => {
             res.status(response.status).send(rewrittenHtml);
             
         } else {
-            // ** JAVÍTÁS 2: Eltávolítottuk az agresszív JS/CSS string cserét. **
-            // B) MINDEN MÁS TARTALOM (JS, CSS, Képek, videók, stb.) - stream
+            // B) MINDEN MÁS TARTALOM (JS, CSS, Képek, videók, stb.) - stream
             
             res.setHeader('Content-Type', contentType); 
             res.status(response.status);
 
-            // Content-Length beállítása, ha létezik, a streameléshez
             const contentLength = newRespHeaders.get('content-length');
             if (contentLength) {
                 res.setHeader('Content-Length', contentLength);
