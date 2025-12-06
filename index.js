@@ -477,4 +477,95 @@ app.all('*', async (req, res) => {
         const contentType = newRespHeaders.get('content-type') || ''; 
         
         // JAVÍTÁS 1: Átirányítási (Location) fejlécek felülírása
-        rewriteLocationHeader(targetURL, newRespHeaders, currentProxy
+        rewriteLocationHeader(targetURL, newRespHeaders, currentProxyDomain);
+
+        // KRITIKUS FEJLÉCEK TÖRLÉSE ÉS KÖTELEZŐ CORS BEÁLLÍTÁS MINDEN VÁLASZ ESETÉN! (Tubi fix)
+        newRespHeaders.delete('content-encoding'); 
+        newRespHeaders.delete('content-security-policy'); 
+        newRespHeaders.delete('x-frame-options');
+        newRespHeaders.delete('x-content-type-options'); 
+        newRespHeaders.delete('x-render-origin-server');
+        newRespHeaders.delete('x-powered-by');
+        
+        // >>> ÚJ JAVÍTÁS: További CORS és kapcsolódó fejlécek agresszív eltávolítása
+        newRespHeaders.delete('access-control-allow-origin');
+        newRespHeaders.delete('access-control-allow-credentials');
+        newRespHeaders.delete('access-control-allow-methods');
+        newRespHeaders.delete('access-control-allow-headers');
+        // <<< VÉGE
+        
+        // KÖTELEZŐ CORS: Minden válasznál engedélyezzük.
+        newRespHeaders.set('access-control-allow-origin', '*'); 
+
+        // Fejlécek továbbítása
+        res.status(response.status);
+
+        newRespHeaders.forEach((value, name) => {
+            if (name.toLowerCase() !== 'content-length' && 
+                !ALL_HEADERS_TO_STRIP.includes(name.toLowerCase())) { 
+                res.setHeader(name, value);
+            }
+        });
+        
+        // A) HTML ESET: Átírás és küldés
+        if (contentType.includes('text/html') || contentType.includes('application/xhtml+xml')) {
+            console.log(`Handling HTML for: ${targetURL.href}`);
+            const htmlText = await response.text();
+            
+            const rewrittenHtml = rewriteHtmlContent(htmlText, targetURL, currentProxyDomain); 
+            
+            res.setHeader('Content-Type', 'text/html; charset=utf-8'); 
+            // Itt ne állítsuk be a Content-Length-et, mivel a tartalom mérete megváltozott
+            res.status(response.status).send(rewrittenHtml);
+            
+        // B) CSS ESET: Átírás és küldés (ÚJ JAVÍTÁS)
+        } else if (contentType.includes('text/css')) {
+            console.log(`Handling CSS for: ${targetURL.href}`);
+            const cssText = await response.text();
+            
+            const rewrittenCss = rewriteCssContent(cssText, targetURL, currentProxyDomain); 
+            
+            res.setHeader('Content-Type', 'text/css; charset=utf-8'); 
+            // Itt ne állítsuk be a Content-Length-et, mivel a tartalom mérete megváltozott
+            res.status(response.status).send(rewrittenCss);
+            
+        } else {
+            // C) MINDEN MÁS TARTALOM (JS, Képek, videók, stb.) - stream
+            
+            res.setHeader('Content-Type', contentType); 
+
+            const contentLength = newRespHeaders.get('content-length');
+            if (contentLength) {
+                res.setHeader('Content-Length', contentLength);
+            }
+            console.log(`Streaming ${contentType} for: ${targetURL.href}`);
+            
+            // Az eredeti adatfolyam streamelése
+            response.body.pipe(res);
+
+            response.body.on('error', (err) => {
+                console.error('Stream error:', err);
+                if (!res.headersSent) {
+                    res.status(502).end();
+                }
+            });
+        }
+
+    } catch (error) {
+        console.error(`PROXY CRITICAL ERROR for ${req.url}:`, error.message);
+        
+        if (!res.headersSent) {
+             res.status(502).type('text/plain').send(`PROXY HÁLÓZATI VAGY BELSŐ HIBA (502): ${error.message}.`);
+        }
+    }
+});
+
+
+// ===============================================
+// 5. SZERVER INDÍTÁSA
+// ===============================================
+
+app.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+    console.log(`Proxy domain: ${currentProxyDomain}`);
+});
