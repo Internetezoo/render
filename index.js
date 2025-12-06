@@ -24,48 +24,42 @@ app.use(express.raw({ type: '*/*' }));
 
 /**
  * Átírja a HTML tartalomban lévő URL-eket a proxy domainjére és INJEKTÁLJA A JS INTERCEPTORT.
+ * Ez a rész kezeli a Tubi abszolút URL-eket és a Roku relatív API hívásokat.
  */
 function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const $ = cheerio.load(html);
     
-    // A proxizott URL-hez szükséges prefix
     const proxyPrefix = `https://${proxyDomain}/proxy?url=`;
-    // Az eredeti céloldal gyökerét használjuk a JS kódhoz
     const originalTargetOrigin = targetURL.origin;
 
     // --- KRITIKUS JAVÍTÁS: Kliensoldali Hálózati Hívás Interceptor ---
-    // Ez a script felülírja a böngésző fetch és XHR metódusait, javítva a Tubi és Roku dinamikus hívásait.
     const clientSidePatch = `
         <script>
             (function() {
                 const proxyPrefix = '${proxyPrefix}';
                 const currentProxyDomain = '${proxyDomain}';
-                const originalTargetOrigin = '${originalTargetOrigin}'; // https://therokuchannel.roku.com vagy https://tubitv.com
+                const originalTargetOrigin = '${originalTargetOrigin}'; // pl. https://tubitv.com
 
                 function resolveAndProxy(resource) {
                     let urlString = resource;
-                    
                     if (typeof urlString !== 'string') {
                         return resource;
                     }
                     
-                    // 1. Abszolút URL-ek kezelése (pl. https://md0.tubitv.com/...)
+                    // 1. Abszolút URL-ek kezelése (Tubi Fix: md0.tubitv.com, mcdn.tubitv.com, stb.)
                     if (urlString.startsWith('http')) {
                         if (!urlString.includes(currentProxyDomain)) {
-                            // Tubi Fix: Hozzáadja a proxy előtagot
                             return proxyPrefix + encodeURIComponent(urlString);
                         }
-                        return urlString; // Már proxizott
+                        return urlString;
                     }
                     
-                    // 2. Gyökér-relatív URL-ek kezelése (pl. /api/v2/experiments VAGY /s/1/10/...js)
+                    // 2. Gyökér-relatív URL-ek kezelése (Roku Fix: /api/..., /s/..., /sw.js)
                     if (urlString.startsWith('/')) {
-                        // Roku Fix: Feloldja az eredeti céloldal gyökércímére, majd proxyzza.
                         const absoluteUrl = originalTargetOrigin + urlString;
                         return proxyPrefix + encodeURIComponent(absoluteUrl);
                     }
 
-                    // 3. Egyéb relatív URL-eket (pl. ./asset) hagyjuk, a böngésző feloldja.
                     return resource;
                 }
                 
@@ -109,7 +103,7 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
 
             if (originalUrl) {
                 
-                // Gyökér-relatív linkek kezelése (/path/to/asset).
+                // Gyökér-relatív linkek kezelése (/path/to/asset, pl. /service-worker.js, /manifest.json)
                 if (originalUrl.startsWith('/') && !originalUrl.startsWith('//')) {
                     const absoluteUrl = targetURL.origin + originalUrl;
                     const proxiedUrl = `https://${proxyDomain}/proxy?url=${encodeURIComponent(absoluteUrl)}`;
@@ -132,7 +126,7 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
 }
 
 /**
- * Generálja az egyszerű kezdőoldalt.
+ * Generálja az egyszerű kezdőoldalt. (omitted)
  */
 function getHomePage(proxyDomain) {
     return `
@@ -189,10 +183,18 @@ app.all('*', async (req, res) => {
             return res.status(200).type('text/html').send(getHomePage(currentProxyDomain));
         }
 
-        // KRITIKUS JAVÍTÁS (500-as Hiba/Hiányos Asset Kezelése a Referer alapján)
-        // Elkapja a Roku hiányos /api/v2/... és /s/... hívásait, mielőtt azok 404-et, 
-        // vagy 500-as szerverhibát okoznának.
-        if (req.path !== '/proxy' && req.headers['referer'] && (req.path.includes('/api/') || req.path.includes('/s/'))) {
+        // 🛑 KRITIKUS JAVÍTÁS (Agresszív Asset Átirányítás)
+        // Kezeli a Roku és Tubi Service Worker és Asset útvonalait, amelyek a proxy domainen jelennek meg.
+        const isStrayPath = req.path.includes('/api/') || 
+                            req.path.includes('/s/') || 
+                            req.path.endsWith('.js') ||
+                            req.path.endsWith('.json') ||
+                            req.path.endsWith('.mp4') ||
+                            req.path.endsWith('service-worker.js') ||
+                            req.path.endsWith('sw.js') ||
+                            req.path.endsWith('manifest.json');
+
+        if (req.path !== '/proxy' && req.headers['referer'] && isStrayPath) {
             
             const referrer = req.headers['referer'];
             let assumedTargetOrigin = ''; 
@@ -213,6 +215,7 @@ app.all('*', async (req, res) => {
                 const correctProxyUrl = `/proxy?url=${encodeURIComponent(absoluteTargetUrl)}`;
                 
                 console.log(`REDIRECTING STRAY ASSET: ${req.path} -> ${correctProxyUrl}`);
+                // 302-es átirányítás a helyes proxy URL-re
                 return res.redirect(302, correctProxyUrl);
             }
         }
