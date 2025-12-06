@@ -42,25 +42,43 @@ app.use(express.raw({ type: '*/*', limit: MAX_BODY_SIZE }));
 // 2. KRITIKUS FEJLÉC SZŰRŐ ÉS JAVÍTÓ FUNKCIÓK
 // ===============================================
 
-function filterRequestHeaders(originalHeaders, targetHost) {
+/**
+ * JAVÍTÁS 4 (KRITIKUS): Megszűri a proxy felé érkező request headereket,
+ * és eltávolítja a problémás Referer fejlécet, majd helyette a céloldal Originjét küldi.
+ * @param {object} originalHeaders Az eredeti HTTP headerek.
+ * @param {URL} targetURL A céloldal URL objektuma.
+ * @returns {object} A target felé küldendő megtisztított headerek.
+ */
+function filterRequestHeaders(originalHeaders, targetURL) {
     const newHeaders = {};
     const lowerCaseHeadersToStrip = ALL_HEADERS_TO_STRIP.map(h => h.toLowerCase());
+    const targetHost = targetURL.host;
 
     for (const [key, value] of Object.entries(originalHeaders)) {
-        if (!['host', 'connection', 'content-length'].includes(key.toLowerCase()) && 
-            !lowerCaseHeadersToStrip.includes(key.toLowerCase()) && value) {
+        const lowerKey = key.toLowerCase();
+        
+        // KRITIKUS: Nem továbbítjuk a Host, Connection, Content-Length, és REFERER headereket!
+        if (!['host', 'connection', 'content-length', 'referer'].includes(lowerKey) && 
+            !lowerCaseHeadersToStrip.includes(lowerKey) && value) {
             newHeaders[key] = value;
         }
     }
 
+    // Spoofolt headerek beállítása
     newHeaders['Host'] = targetHost;
     
     if (!newHeaders['user-agent']) {
         newHeaders['User-Agent'] = STANDARD_USER_AGENT;
     }
 
-    newHeaders['Referer'] = `https://${targetHost}/`; 
-    
+    // KRITIKUS JAVÍTÁS: A Referer fejléc az eredeti oldal origin-jét kell, hogy mutassa.
+    newHeaders['Referer'] = targetURL.origin + '/'; 
+
+    // Tubihoz is kellhet a kiegészítő Origin
+    if (targetHost.includes('tubitv.com') || targetHost.includes('roku.com')) {
+        newHeaders['Origin'] = targetURL.origin;
+    }
+
     return newHeaders;
 }
 
@@ -94,19 +112,13 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
     
     const proxyPrefix = `https://${proxyDomain}/proxy?url=`;
     const originalTargetOrigin = targetURL.origin;
-    const originalTargetHost = targetURL.host; // Hozzáadva a kliensoldali scriptekhez
-    const isRoku = originalTargetHost.includes('roku.com'); // Roku ellenőrzése
+    const originalTargetHost = targetURL.host; 
 
     // --- KRITIKUS JAVÍTÁS: Kliensoldali Hálózati Hívás Interceptor ---
     const clientSidePatch = `
         <script>
             // Proxy Interceptor Script - Dinamikus hívások átirányítása
             (function() {
-                const isRokuChannel = ${isRoku}; // Megtartjuk a Roku domain ellenőrzését
-                
-                // ** JAVÍTÁS 2: Eltávolítottuk a document.domain agresszív, string-alapú cseréjét, **
-                // ** ami valószínűleg a Tubi fehér oldalát okozta. **
-
                 const currentProxyDomain = '${proxyDomain}';
                 const originalTargetHost = '${originalTargetHost}';
                 const proxyPrefix = '${proxyPrefix}';
@@ -161,8 +173,7 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
     
     // --- Statikus linkek átírása (HTML tag-ek) ---
     $('a, link, script, img, source, meta').each((i, element) => {
-        // ... (A statikus linkek átírása változatlan maradt) ...
-        let attribute = '';
+        let attribute = '';
         if (element.tagName === 'a' || element.tagName === 'link') {
             attribute = 'href';
         } else if (element.tagName === 'script' || element.tagName === 'img' || element.tagName === 'source') {
@@ -232,15 +243,6 @@ function getHomePage(proxyDomain) {
                 button:hover { background: #0056b3; }
                 p.info { margin-top: 20px; font-size: 0.9em; color: #666; }
             </style>
-        </head>
-        <body>
-            <h1>Web Proxy Kliens Aktív</h1>
-            <p>Használja az alábbi mezőt a proxyzott URL eléréséhez:</p>
-            <form onsubmit="redirectToProxy(event)">
-                <input type="text" id="targetUrl" placeholder="Írja be a cél URL-t (pl. https://tubitv.com)">
-                <button type="submit">Proxy Go</button>
-            </form>
-            <p class="info">Proxy domain: <code>https://${proxyDomain}</code></p>
             <script>
                 function redirectToProxy(event) {
                     event.preventDefault();
@@ -251,6 +253,15 @@ function getHomePage(proxyDomain) {
                     }
                 }
             </script>
+        </head>
+        <body>
+            <h1>Web Proxy Kliens Aktív</h1>
+            <p>Használja az alábbi mezőt a proxyzott URL eléréséhez:</p>
+            <form onsubmit="redirectToProxy(event)">
+                <input type="text" id="targetUrl" placeholder="Írja be a cél URL-t (pl. https://tubitv.com)">
+                <button type="submit">Proxy Go</button>
+            </form>
+            <p class="info">Proxy domain: <code>https://${proxyDomain}</code></p>
         </body>
         </html>
     `;
@@ -271,7 +282,6 @@ app.all('*', async (req, res) => {
         }
 
         // B) Stray Asset Átirányítás (FIX android-chrome-144x144.png 404-re)
-        // ... (ez a rész változatlan maradt) ...
         const isStrayAsset = req.path.includes('/api/') || req.path.includes('/s/') || req.path.includes('/v1/') ||
                              req.path.endsWith('.js') || req.path.endsWith('.json') || 
                              req.path.endsWith('.css') || req.path.endsWith('.m3u8') || 
@@ -328,8 +338,9 @@ app.all('*', async (req, res) => {
         console.log(`Proxying request for: ${targetURL.href}`);
 
         // --- PROXY KÉRÉS ELKÜLDÉSE (fetch) ---
-
-        const fetchHeaders = filterRequestHeaders(req.headers, targetURL.host);
+        
+        // JAVÍTÁS 4: Itt adjuk át az URL objektumot, hogy tudjuk használni az origin-t
+        const fetchHeaders = filterRequestHeaders(req.headers, targetURL); 
         
         const fetchOptions = {
             method: req.method,
