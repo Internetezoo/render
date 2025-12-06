@@ -1,4 +1,4 @@
-// index.js - Javított Node.js/Express Proxy Service (Render.com)
+// index.js - Teljesen optimalizált Node.js/Express Proxy Service (Render.com)
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -12,8 +12,7 @@ const PORT = process.env.PORT || 3000;
 // 1. KONFIGURÁCIÓ
 // ===============================================
 
-// A Render szolgáltatás domainje (pl. render-bj2x.onrender.com).
-// KRITIKUS: Ezt be kell állítani a Render URL-jére!
+// A proxy domainje. Ez olvassa be a Renderen beállított PROXY_DOMAIN környezeti változót.
 const currentProxyDomain = process.env.PROXY_DOMAIN || 'localhost:3000';
 
 // Minden kérést elfogadunk (POST, GET, stb.) és olvassuk a nyers kérés testet (body)
@@ -47,7 +46,6 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
                 const absoluteUrl = url.resolve(targetURL.href, originalUrl);
                 
                 if (absoluteUrl.startsWith('http')) {
-                    // Új URL formátum: /proxy?url=
                     const proxiedUrl = `https://${proxyDomain}/proxy?url=${encodeURIComponent(absoluteUrl)}`;
                     $(element).attr(attribute, proxiedUrl);
                 }
@@ -120,7 +118,7 @@ app.all('*', async (req, res) => {
         if (req.path === '/proxy' && req.query.url) {
             targetURL = new URL(req.query.url);
         } else {
-            // Nem értelmezhető útvonal
+            // Nem értelmezhető útvonal (404-et ad vissza)
             if (!res.headersSent) {
                 return res.status(404).send('Not Found or Invalid Proxy URL Format. Használja a /proxy?url=... formátumot.');
             }
@@ -131,12 +129,17 @@ app.all('*', async (req, res) => {
 
         // --- PROXY KÉRÉS ELKÜLDÉSE (fetch) ---
         
+        // Kérés fejlécek beállítása a 403-as hiba esélyének csökkentésére
         const fetchOptions = {
             method: req.method,
             headers: {
-                'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0',
+                // Részletes User-Agent használata a blokkolás elkerülésére
+                'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
                 'Referer': targetURL.origin,
                 'Host': targetURL.host,
+                'Accept': req.headers['accept'] || '*/*',
+                'Accept-Language': req.headers['accept-language'] || 'en-US,en;q=0.9,hu;q=0.8',
+                'Content-Type': req.headers['content-type'] || undefined, 
             },
             body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
         };
@@ -148,11 +151,11 @@ app.all('*', async (req, res) => {
         const newRespHeaders = new Headers(response.headers);
         const contentType = newRespHeaders.get('content-type') || ''; 
 
-        // KRITIKUS FEJLÉC TÖRLÉSEK: Megakadályozzuk a dekódolási és biztonsági hibákat!
-        newRespHeaders.delete('content-encoding'); // EZ JAVÍTJA A net::ERR_CONTENT_DECODING_FAILED HIBÁT
+        // KRITIKUS FEJLÉC TÖRLÉSEK: Ezeket MINDEN válasz esetén törölni kell!
+        newRespHeaders.delete('content-encoding'); // JAVÍTJA A net::ERR_CONTENT_DECODING_FAILED HIBÁT
         newRespHeaders.delete('content-security-policy'); 
         newRespHeaders.delete('x-frame-options');
-        newRespHeaders.delete('x-content-type-options'); // Ez is segít a MIME-típus hibák elkerülésében
+        newRespHeaders.delete('x-content-type-options'); 
         newRespHeaders.set('access-control-allow-origin', '*'); 
 
         // Minden más fejléceket másolunk
@@ -193,10 +196,10 @@ app.all('*', async (req, res) => {
         }
 
     } catch (error) {
-        // Globális Hiba Kezelés (a try blokk bármilyen váratlan hibája)
+        // Globális Hiba Kezelés (bármilyen váratlan hiba a try blokkban)
         console.error(`PROXY CRITICAL ERROR for ${req.url}:`, error.message);
         
-        // Küldjünk 502-t, ha hálózati vagy belső hiba miatt nem tudunk válaszolni
+        // Küldjünk 502-t, ha nem tudunk válaszolni
         if (!res.headersSent) {
              res.status(502).type('text/plain').send(`PROXY HÁLÓZATI VAGY BELSŐ HIBA (502): ${error.message}. Kérem, ellenőrizze a céloldal elérhetőségét.`);
         }
