@@ -1,4 +1,4 @@
-// index.js - Teljesen optimalizált Node.js/Express Proxy Service (Render.com)
+// index.js - Végleges, stabil Node.js/Express Proxy Service (Render.com)
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -6,17 +6,16 @@ const cheerio = require('cheerio');
 const url = require('url');
 
 const app = express();
-// process.env.PORT lehet, hogy két process.env-t tartalmazott, javítva:
 const PORT = process.env.PORT || 3000; 
 
 // ===============================================
 // 1. KONFIGURÁCIÓ
 // ===============================================
 
-// A proxy domainje. Ez olvassa be a Renderen beállított PROXY_DOMAIN környezeti változót.
+// A proxy domainje. Fontos, hogy be legyen állítva a Renderen a PROXY_DOMAIN.
 const currentProxyDomain = process.env.PROXY_DOMAIN || 'localhost:3000';
 
-// Minden kérést elfogadunk (POST, GET, stb.) és olvassuk a nyers kérés testet (body)
+// Minden kérést elfogadunk (POST, GET, stb.)
 app.use(express.raw({ type: '*/*' }));
 
 // ===============================================
@@ -29,22 +28,9 @@ app.use(express.raw({ type: '*/*' }));
 function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const $ = cheerio.load(html);
     
-    // --- KRITIKUS JAVÍTÁS: ABSZOLÚT <base> tag injektálása ---
-    // Ez biztosítja, hogy a JavaScript által dinamikusan generált gyökér-relatív linkek
-    // (pl. /s/1/7/...) is a proxy szerver ABSZOLÚT címére mutassanak!
-
-    // A proxizott céloldal ABSZOLÚT gyökér URL-je: https://render-bj2x.onrender.com/proxy?url=https://targetdomain.com/
-    const proxiedTargetOrigin = `https://${proxyDomain}/proxy?url=${encodeURIComponent(targetURL.origin)}/`;
+    // --- VISSZAVONVA: A <base> tag eltávolítva a böngésző zavarára hivatkozva. ---
     
-    if ($('head').length) {
-        $('head').prepend(`<base href="${proxiedTargetOrigin}">`);
-    } else {
-        // Ha nincs <head> (pl. hibás HTML), beszúrjuk a <body> elé
-        $('body').prepend(`<base href="${proxiedTargetOrigin}">`);
-    }
-    
-    // --- Létrehozott/statikus linkek átírása ---
-    // Keresünk linkeket, scripteket, képeket, stb.
+    // Létrehozott/statikus linkek átírása
     $('a, link, script, img, source, meta').each((i, element) => {
         let attribute = '';
         if (element.tagName === 'a' || element.tagName === 'link') {
@@ -59,6 +45,20 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
             let originalUrl = $(element).attr(attribute);
 
             if (originalUrl) {
+                
+                // KRITIKUS JAVÍTÁS: Külön kezeljük a gyökér-relatív linkeket (/path/to/asset).
+                // Ez megakadályozza, hogy a böngésző a render-bj2x.onrender.com gyökerére oldja fel!
+                if (originalUrl.startsWith('/') && !originalUrl.startsWith('//')) {
+                    // Az abszolút URL: a céloldal gyökére + a relatív elérési út
+                    const absoluteUrl = targetURL.origin + originalUrl;
+                    
+                    // A proxizott URL (https://proxy.com/proxy?url=https://target.com/path)
+                    const proxiedUrl = `https://${proxyDomain}/proxy?url=${encodeURIComponent(absoluteUrl)}`;
+                    $(element).attr(attribute, proxiedUrl);
+                    return; 
+                }
+
+                // EREDETI LOGIKA: Minden más link (teljes URL-ek, relatív linkek)
                 // Átalakítjuk abszolút URL-re, ha relatív
                 const absoluteUrl = url.resolve(targetURL.href, originalUrl);
                 
