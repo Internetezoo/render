@@ -100,7 +100,7 @@ function rewriteLocationHeader(targetURL, responseHeaders, proxyDomain) {
 
 
 // ===============================================
-// 3. HTML TARTALOM ÁTÍRÓ ÉS INJEKTOR
+// 3. HTML / CSS TARTALOM ÁTÍRÓK ÉS INJEKTOR
 // ===============================================
 
 /**
@@ -236,6 +236,70 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
     });
 
     return $.html();
+}
+
+/**
+ * JAVÍTÁS 5: CSS tartalom átírása az URL-ek proxyzálására.
+ * Különösen fontos a betűtípusokkal kapcsolatos CORS hibák megoldásához,
+ * mivel azok gyakran relatív útvonalakkal vannak megadva a CSS-ben.
+ */
+function rewriteCssContent(cssText, targetURL, proxyDomain) {
+    const targetOrigin = targetURL.origin;
+    const targetHost = targetURL.host;
+    const proxyPrefix = `https://${proxyDomain}/proxy?url=`;
+
+    // Regex az url() minták keresésére. A match[1] lesz az url belseje.
+    const rewrittenCss = cssText.replace(/url\(['"]?([^)'"]+)['"]?\)/gi, (match, originalUrl) => {
+        let urlString = originalUrl.trim();
+        
+        // Adat URL-eket és proxyzott URL-eket hagyjuk ki
+        if (urlString.startsWith('data:') || urlString.includes(proxyDomain)) {
+            return match;
+        }
+
+        let absoluteUrl;
+        
+        // 1. Abszolút vagy protokoll-relatív URL-ek
+        if (urlString.startsWith('http') || urlString.startsWith('//')) {
+            // Protokoll-relatív URL-ek kezelése (//example.com/path)
+            if (urlString.startsWith('//')) {
+                urlString = targetURL.protocol + urlString;
+            }
+            
+            try {
+                absoluteUrl = new URL(urlString);
+            } catch (e) {
+                return match; // Hiba esetén hagyjuk változatlanul
+            }
+
+        // 2. Relatív vagy gyökér-relatív URL-ek
+        } else {
+            // Használjuk a Node.js `url.resolve`-ot az abszolút útvonal megállapításához (az origin alapján).
+            try {
+                // Az `url.resolve` stringet ad vissza, ami lehet teljes URL is.
+                absoluteUrl = url.resolve(targetOrigin, urlString);
+            } catch(e) {
+                return match;
+            }
+            
+            // Alakítsuk át URL objektummá.
+            try {
+                 absoluteUrl = new URL(absoluteUrl);
+            } catch(e) {
+                return match;
+            }
+        }
+        
+        // Proxyzáljuk, ha a célhostot tartalmazza (beleértve a subdomaint is)
+        if (absoluteUrl && (absoluteUrl.hostname.endsWith(targetHost) || absoluteUrl.hostname === targetHost)) {
+            const proxiedUrl = proxyPrefix + encodeURIComponent(absoluteUrl.href);
+            return `url('${proxiedUrl}')`;
+        }
+        
+        return match; // Eredeti URL visszaadása
+    });
+
+    return rewrittenCss;
 }
 
 /**
@@ -413,76 +477,4 @@ app.all('*', async (req, res) => {
         const contentType = newRespHeaders.get('content-type') || ''; 
         
         // JAVÍTÁS 1: Átirányítási (Location) fejlécek felülírása
-        rewriteLocationHeader(targetURL, newRespHeaders, currentProxyDomain);
-
-        // KRITIKUS FEJLÉCEK TÖRLÉSE ÉS KÖTELEZŐ CORS BEÁLLÍTÁS MINDEN VÁLASZ ESETÉN! (Tubi fix)
-        newRespHeaders.delete('content-encoding'); 
-        newRespHeaders.delete('content-security-policy'); 
-        newRespHeaders.delete('x-frame-options');
-        newRespHeaders.delete('x-content-type-options'); 
-        newRespHeaders.delete('x-render-origin-server');
-        newRespHeaders.delete('x-powered-by');
-        // KÖTELEZŐ CORS: Minden válasznál engedélyezzük.
-        newRespHeaders.set('access-control-allow-origin', '*'); 
-
-        // Fejlécek továbbítása
-        res.status(response.status);
-
-        newRespHeaders.forEach((value, name) => {
-            if (name.toLowerCase() !== 'content-length' && 
-                !ALL_HEADERS_TO_STRIP.includes(name.toLowerCase())) { 
-                res.setHeader(name, value);
-            }
-        });
-        
-        // A) HTML ESET: Átírás és küldés
-        if (contentType.includes('text/html') || contentType.includes('application/xhtml+xml')) {
-            console.log(`Handling HTML for: ${targetURL.href}`);
-            const htmlText = await response.text();
-            
-            const rewrittenHtml = rewriteHtmlContent(htmlText, targetURL, currentProxyDomain); 
-            
-            res.setHeader('Content-Type', 'text/html; charset=utf-8'); 
-            // Itt ne állítsuk be a Content-Length-et, mivel a tartalom mérete megváltozott
-            res.status(response.status).send(rewrittenHtml);
-            
-        } else {
-            // B) MINDEN MÁS TARTALOM (JS, CSS, Képek, videók, stb.) - stream
-            
-            res.setHeader('Content-Type', contentType); 
-
-            const contentLength = newRespHeaders.get('content-length');
-            if (contentLength) {
-                res.setHeader('Content-Length', contentLength);
-            }
-            console.log(`Streaming ${contentType} for: ${targetURL.href}`);
-            
-            // Az eredeti adatfolyam streamelése
-            response.body.pipe(res);
-
-            response.body.on('error', (err) => {
-                console.error('Stream error:', err);
-                if (!res.headersSent) {
-                    res.status(502).end();
-                }
-            });
-        }
-
-    } catch (error) {
-        console.error(`PROXY CRITICAL ERROR for ${req.url}:`, error.message);
-        
-        if (!res.headersSent) {
-             res.status(502).type('text/plain').send(`PROXY HÁLÓZATI VAGY BELSŐ HIBA (502): ${error.message}.`);
-        }
-    }
-});
-
-
-// ===============================================
-// 5. SZERVER INDÍTÁSA
-// ===============================================
-
-app.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
-    console.log(`Proxy domain: ${currentProxyDomain}`);
-});
+        rewriteLocationHeader(targetURL, newRespHeaders, currentProxy
