@@ -30,44 +30,52 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
     
     // A proxizott URL-hez szükséges prefix
     const proxyPrefix = `https://${proxyDomain}/proxy?url=`;
+    
+    // Az eredeti céloldal gyökerét használjuk a JS kódhoz
+    const originalTargetOrigin = targetURL.origin;
 
-    // --- KRITIKUS JAVÍTÁS: Kliensoldali JS hálózati hívás interceptor injektálása ---
+    // --- KRITIKUS JAVÍTÁS: Kliensoldali Hálózati Hívás Interceptor ---
+    // Ez a script felülírja a böngésző fetch és XHR metódusait.
     const clientSidePatch = `
         <script>
             (function() {
                 const proxyPrefix = '${proxyPrefix}';
                 const currentProxyDomain = '${proxyDomain}';
+                const originalTargetOrigin = '${originalTargetOrigin}';
+
+                function resolveAndProxy(resource) {
+                    // Ha a kérés abszolút, de nem proxizott (Tubi API hívás), proxyzzuk.
+                    if (typeof resource === 'string' && resource.startsWith('http')) {
+                        if (!resource.includes(currentProxyDomain)) {
+                            // Hozzáadja a proxy?url= előtagot
+                            return proxyPrefix + encodeURIComponent(resource);
+                        }
+                        return resource;
+                    }
+                    
+                    // Ha a kérés relatív (pl. /s/1/7/... Roku asset), feloldjuk a céloldal gyökerére, majd proxyzzuk.
+                    if (typeof resource === 'string' && resource.startsWith('/')) {
+                        // Kézzel pótoljuk a hiányzó Roku címet
+                        const absoluteUrl = originalTargetOrigin + resource;
+                        // Hozzáadjuk a proxy?url= előtagot
+                        return proxyPrefix + encodeURIComponent(absoluteUrl);
+                    }
+
+                    // Minden mást (pl. relatív könyvtár, vagy nem string) hagyunk.
+                    return resource;
+                }
                 
                 // 1. fetch() felülírása
                 const originalFetch = window.fetch;
                 window.fetch = function(resource, options) {
-                    let proxiedResource = resource;
-                    
-                    if (typeof resource === 'string' && 
-                        resource.startsWith('http') && 
-                        !resource.includes(currentProxyDomain)
-                    ) {
-                        // Átírjuk az abszolút URL-eket a proxy formátumra
-                        proxiedResource = proxyPrefix + encodeURIComponent(resource);
-                    }
-                    // A gyökér-relatív URL-eket a <base> tag vagy a statikus átírás kezeli.
-                    
+                    const proxiedResource = resolveAndProxy(resource);
                     return originalFetch(proxiedResource, options);
                 };
 
                 // 2. XMLHttpRequest.open() felülírása (XHR hívások elfogása)
                 const originalXhrOpen = XMLHttpRequest.prototype.open;
                 XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
-                    let proxiedUrl = url;
-
-                    if (typeof url === 'string' && 
-                        url.startsWith('http') && 
-                        !url.includes(currentProxyDomain)
-                    ) {
-                        // Átírjuk az abszolút URL-eket a proxy formátumra
-                        proxiedUrl = proxyPrefix + encodeURIComponent(url);
-                    }
-                    
+                    const proxiedUrl = resolveAndProxy(url);
                     originalXhrOpen.call(this, method, proxiedUrl, async, user, password);
                 };
             })();
@@ -81,7 +89,7 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
         $('body').prepend(clientSidePatch);
     }
     
-    // --- Statikus linkek átírása (marad az eredeti logika) ---
+    // --- Statikus linkek átírása (HTML tag-ek) ---
     $('a, link, script, img, source, meta').each((i, element) => {
         let attribute = '';
         if (element.tagName === 'a' || element.tagName === 'link') {
@@ -97,7 +105,7 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
 
             if (originalUrl) {
                 
-                // Gyökér-relatív linkek kezelése (/path/to/asset).
+                // Statikus gyökér-relatív linkek kezelése (/path/to/asset).
                 if (originalUrl.startsWith('/') && !originalUrl.startsWith('//')) {
                     const absoluteUrl = targetURL.origin + originalUrl;
                     const proxiedUrl = `https://${proxyDomain}/proxy?url=${encodeURIComponent(absoluteUrl)}`;
@@ -195,6 +203,7 @@ app.all('*', async (req, res) => {
         const fetchOptions = {
             method: req.method,
             headers: {
+                // Fejlécek finomhangolása a 403-as hiba esélyének csökkentésére
                 'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36',
                 'Referer': targetURL.origin,
                 'Host': targetURL.host,
@@ -237,7 +246,6 @@ app.all('*', async (req, res) => {
             
         } else {
             // B) MINDEN MÁS TARTALOM (JS, JSON, CSS, Képek)
-            // A JS tartalom átírását a kliensoldali patch miatt elhagytuk, a streamelés marad.
             
             res.setHeader('Content-Type', contentType); 
 
