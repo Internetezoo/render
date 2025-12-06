@@ -1,4 +1,4 @@
-// index.js
+// index.js - Javított Node.js/Express Proxy Service (Render.com)
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -9,7 +9,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===============================================
-// 1. KONFIGURÁCIÓ (Beállítások)
+// 1. KONFIGURÁCIÓ
 // ===============================================
 
 // A Render szolgáltatás domainje (pl. render-bj2x.onrender.com).
@@ -29,7 +29,7 @@ app.use(express.raw({ type: '*/*' }));
 function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const $ = cheerio.load(html);
 
-    // Csak a HTTP(S) linkeket, scripteket és képeket kell átírnunk.
+    // Keresünk linkeket, scripteket, képeket, stb.
     $('a, link, script, img, source, meta').each((i, element) => {
         let attribute = '';
         if (element.tagName === 'a' || element.tagName === 'link') {
@@ -44,10 +44,8 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
             let originalUrl = $(element).attr(attribute);
 
             if (originalUrl) {
-                // Átalakítjuk abszolút URL-re, ha relatív
                 const absoluteUrl = url.resolve(targetURL.href, originalUrl);
                 
-                // Csak HTTP(S) linkeket alakítunk át
                 if (absoluteUrl.startsWith('http')) {
                     // Új URL formátum: /proxy?url=
                     const proxiedUrl = `https://${proxyDomain}/proxy?url=${encodeURIComponent(absoluteUrl)}`;
@@ -95,7 +93,6 @@ function getHomePage(proxyDomain) {
                     event.preventDefault();
                     const targetUrl = document.getElementById('targetUrl').value;
                     if (targetUrl) {
-                        // Ellenőrizzük, hogy a protokoll meg van-e adva
                         const fullUrl = targetUrl.startsWith('http') ? targetUrl : 'https://' + targetUrl;
                         window.location.href = '/proxy?url=' + encodeURIComponent(fullUrl);
                     }
@@ -110,22 +107,20 @@ function getHomePage(proxyDomain) {
 // 3. FŐ ÚTVONAL KEZELŐ (Route Handler)
 // ===============================================
 
-// Minden bejövő kérést ez a funkció dolgoz fel.
 app.all('*', async (req, res) => {
     try {
         let targetURL;
 
-        // A) Kezdőoldal: Ha a gyökérre érkezik kérés, de nincs 'url' paraméter
+        // A) Kezdőoldal: /
         if (req.path === '/' && !req.query.url) {
             return res.status(200).type('text/html').send(getHomePage(currentProxyDomain));
         }
 
         // B) A fő proxy logika: /proxy?url=...
         if (req.path === '/proxy' && req.query.url) {
-            // URL objektum létrehozása a target URL-ből
             targetURL = new URL(req.query.url);
         } else {
-            // Ha a kérés nem a gyökérre és nem a /proxy útvonalra érkezik
+            // Nem értelmezhető útvonal
             if (!res.headersSent) {
                 return res.status(404).send('Not Found or Invalid Proxy URL Format. Használja a /proxy?url=... formátumot.');
             }
@@ -134,14 +129,11 @@ app.all('*', async (req, res) => {
 
         console.log(`Proxying request for: ${targetURL.href}`);
 
-        // -------------------------------------------------------------
-        // A PROXY KÉRÉS ELKÜLDÉSE (fetch)
-        // -------------------------------------------------------------
+        // --- PROXY KÉRÉS ELKÜLDÉSE (fetch) ---
         
         const fetchOptions = {
             method: req.method,
             headers: {
-                // Fejlécek felülírása/másolása
                 'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0',
                 'Referer': targetURL.origin,
                 'Host': targetURL.host,
@@ -149,31 +141,29 @@ app.all('*', async (req, res) => {
             body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : undefined,
         };
         
-        // Elküldjük a kérést a céloldalnak
         const response = await fetch(targetURL.href, fetchOptions);
 
-        // -------------------------------------------------------------
-        // VÁLASZ ELŐKÉSZÍTÉSE ÉS Továbbítás
-        // -------------------------------------------------------------
+        // --- VÁLASZ ELŐKÉSZÍTÉSE ÉS Továbbítás ---
 
-        // Fejlécek másolása a válaszból
         const newRespHeaders = new Headers(response.headers);
         const contentType = newRespHeaders.get('content-type') || ''; 
 
-        // Biztonsági és CORS fejlécek Törlése/Felülírása (KRITIKUS)
+        // KRITIKUS FEJLÉC TÖRLÉSEK: Megakadályozzuk a dekódolási és biztonsági hibákat!
+        newRespHeaders.delete('content-encoding'); // EZ JAVÍTJA A net::ERR_CONTENT_DECODING_FAILED HIBÁT
         newRespHeaders.delete('content-security-policy'); 
         newRespHeaders.delete('x-frame-options');
+        newRespHeaders.delete('x-content-type-options'); // Ez is segít a MIME-típus hibák elkerülésében
         newRespHeaders.set('access-control-allow-origin', '*'); 
 
-        // Minden más fejléceket másolunk az Express válaszba
+        // Minden más fejléceket másolunk
         newRespHeaders.forEach((value, name) => {
-            // Elkerüljük a Content-Length másolását a streameléskor
-            if (name.toLowerCase() !== 'content-length') {
+            // Elkerüljük a Content-Length és Content-Encoding másolását
+            if (name.toLowerCase() !== 'content-length' && name.toLowerCase() !== 'content-encoding') { 
                 res.setHeader(name, value);
             }
         });
         
-        // A) HTML ESET: Átírás és szinkron küldés
+        // A) HTML ESET: Átírás és küldés
         if (contentType.includes('text/html') || contentType.includes('application/xhtml+xml')) {
             console.log(`Handling HTML for: ${targetURL.href}`);
             const htmlText = await response.text();
@@ -186,7 +176,6 @@ app.all('*', async (req, res) => {
         } else {
             // B) MINDEN MÁS TARTALOM (JSON, CSS, JS, Képek)
             
-            // Biztosítjuk, hogy a Content-Type fejléc be legyen állítva a másolt értékre
             res.setHeader('Content-Type', contentType); 
 
             console.log(`Streaming ${contentType} for: ${targetURL.href}`);
@@ -195,7 +184,6 @@ app.all('*', async (req, res) => {
             // Továbbítjuk a nyers stream-et a kliensnek
             response.body.pipe(res);
 
-            // Figyeljük a stream végét, hogy elkerüljük az akadozást/404-et
             response.body.on('error', (err) => {
                 console.error('Stream error:', err);
                 if (!res.headersSent) {
@@ -208,7 +196,7 @@ app.all('*', async (req, res) => {
         // Globális Hiba Kezelés (a try blokk bármilyen váratlan hibája)
         console.error(`PROXY CRITICAL ERROR for ${req.url}:`, error.message);
         
-        // Ha még nem küldtünk el fejléceket, küldjünk 502-t!
+        // Küldjünk 502-t, ha hálózati vagy belső hiba miatt nem tudunk válaszolni
         if (!res.headersSent) {
              res.status(502).type('text/plain').send(`PROXY HÁLÓZATI VAGY BELSŐ HIBA (502): ${error.message}. Kérem, ellenőrizze a céloldal elérhetőségét.`);
         }
