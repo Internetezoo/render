@@ -1,10 +1,10 @@
-// index.js - Végleges, stabil Node.js/Express Proxy Service (Javított fejlécekkel és CORS/Roku fix-szel)
+// index.js - Végleges, stabil Node.js/Express Proxy Service (Javított Tubi 400 fix-szel)
 
 const express = require('express');
 const fetch = require('node-fetch');
-const cheerio = require('cheerio'); // HTML tartalom elemzéséhez és módosításához
-const url = require('url'); // URL feloldáshoz
-const cors = require('cors'); // CORS problémák kezeléséhez
+const cheerio = require('cheerio'); 
+const url = require('url'); 
+const cors = require('cors'); 
 
 const app = express();
 const PORT = process.env.PORT || 3000; 
@@ -13,7 +13,8 @@ const PORT = process.env.PORT || 3000; 
 // 1. KONFIGURÁCIÓ ÉS ÁLLANDÓK
 // ===============================================
 
-const currentProxyDomain = process.env.PROXY_DOMAIN || 'render-bj2x.onrender.com'; // Feltevések a jelenlegi Render domainről
+// A proxy domainje (render-bj2x.onrender.com)
+const currentProxyDomain = process.env.PROXY_DOMAIN || 'render-bj2x.onrender.com'; 
 const MAX_BODY_SIZE = '50mb';
 const STANDARD_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
@@ -26,12 +27,13 @@ const PROXY_HEADERS_TO_STRIP = [
 ];
 
 // Tubi Autentikációs headerek, amik 400 hibát okoznak, és el kell távolítani
+// A kliens most már query paraméterként küldi ezeket, de továbbra is fontos, hogy 
+// ne kerüljenek be HTTP headerként is.
 const TUBI_AUTH_HEADERS_TO_STRIP = [
     'x-tubi-algorithm', 'x-tubi-date', 'x-tubi-expires',
     'x-tubi-signedheaders', 'x-tubi-signature'
 ];
 
-// Kombinált lista
 const ALL_HEADERS_TO_STRIP = [
     ...PROXY_HEADERS_TO_STRIP,
     ...TUBI_AUTH_HEADERS_TO_STRIP
@@ -39,7 +41,7 @@ const ALL_HEADERS_TO_STRIP = [
 
 // Middleware a body-k és CORS kezeléséhez
 app.use(cors());
-app.use(express.raw({ type: '*/*', limit: MAX_BODY_SIZE })); // Nyers test (body) fogadása minden típusú kéréshez
+app.use(express.raw({ type: '*/*', limit: MAX_BODY_SIZE }));
 
 
 // ===============================================
@@ -48,35 +50,25 @@ app.use(express.raw({ type: '*/*', limit: MAX_BODY_SIZE })); // Nyers test (body
 
 /**
  * Szűri a bejövő headereket, eltávolítva a blokkolt biztonsági és
- * a proxy használatára utaló headereket. Ez a 400 és 403 hibák kulcsa.
- * * @param {object} originalHeaders - Az eredeti bejövő headerek (Express req.headers).
- * @param {string} targetHost - A célállomás hostneve (pl. tubitv.com).
- * @returns {object} A Tubi felé továbbítandó tiszta headerek.
+ * a proxy használatára utaló headereket.
  */
 function filterRequestHeaders(originalHeaders, targetHost) {
     const newHeaders = {};
     const lowerCaseHeadersToStrip = ALL_HEADERS_TO_STRIP.map(h => h.toLowerCase());
 
-    // 1. Az összes érvényes kérés fejléc másolása, kivéve a blokkoltakat
     for (const [key, value] of Object.entries(originalHeaders)) {
-        // Kizárjuk a Host és Content-Length fejléceket, hogy a fetch tudja használni a targetURL host-ját
         if (!['host', 'connection', 'content-length'].includes(key.toLowerCase()) && 
             !lowerCaseHeadersToStrip.includes(key.toLowerCase()) && value) {
             newHeaders[key] = value;
         }
     }
 
-    // 2. KRITIKUS BEÁLLÍTÁSOK A BLOKKOLÁS ELKERÜLÉSÉRE
-    
-    // A cél Host fejlécének beállítása (ez kell a Tubi-nak/Roku-nak a 403 elkerülésére)
     newHeaders['Host'] = targetHost;
     
-    // User-Agent: ha van, továbbítjuk; ha nincs, standard böngésző User-Agent-et állítunk be.
     if (!newHeaders['user-agent']) {
         newHeaders['User-Agent'] = STANDARD_USER_AGENT;
     }
 
-    // Referer fejléc felülírása a cél domainre
     newHeaders['Referer'] = `https://${targetHost}/`; 
     
     return newHeaders;
@@ -97,7 +89,6 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const originalTargetOrigin = targetURL.origin;
 
     // --- KRITIKUS JAVÍTÁS: Kliensoldali Hálózati Hívás Interceptor ---
-    // Ez a script fogja elkapni a JS-ből indított fetch/XHR hívásokat
     const clientSidePatch = `
         <script>
             // Proxy Interceptor Script - Dinamikus hívások átirányítása
@@ -105,14 +96,16 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
                 // ROKU FIX 1: Eltávolítjuk a document.domain hozzárendeléseket a SecurityError elkerülése érdekében
                 try {
                     const domainRegex = /document\\.domain\\s*=\\s*['"].*?['"]/g;
-                    document.documentElement.innerHTML = document.documentElement.innerHTML.replaceAll(domainRegex, '/* document.domain assignment removed by proxy */');
+                    // A replaceAll helyett replace-t használunk egy globális regex-szel, ami szélesebb kompatibilitást biztosít
+                    document.documentElement.innerHTML = document.documentElement.innerHTML.replace(domainRegex, '/* document.domain assignment removed by proxy */');
                 } catch (e) {
                     console.error("Proxy: document.domain removal failed", e);
                 }
 
-                const proxyPrefix = '${proxyPrefix}';
                 const currentProxyDomain = '${proxyDomain}';
-                const originalTargetOrigin = '${originalTargetOrigin}';
+                const originalTargetHost = '${targetURL.host}';
+                const proxyPrefix = '${proxyPrefix}';
+
 
                 function resolveAndProxy(resource) {
                     let urlString = resource;
@@ -120,24 +113,21 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
                         return resource;
                     }
                     
-                    // 1. Ha már proxizva van, hagyjuk békén
                     if (urlString.includes(currentProxyDomain) && urlString.includes('/proxy?url=')) {
                         return urlString;
                     }
                     
-                    // 2. Gyökér-relatív URL-ek kezelése (/api/..., /s/...)
-                    if (urlString.startsWith('/')) {
-                        // Különböző origin feloldás szükséges
+                    // Relatív/Gyökér-relatív URL-ek kezelése
+                    if (urlString.startsWith('/') && !urlString.startsWith('//')) {
                         const absoluteUrl = originalTargetOrigin + urlString;
                         return proxyPrefix + encodeURIComponent(absoluteUrl);
                     }
                     
-                    // 3. Abszolút URL-ek kezelése (ha a céloldalhoz tartozik)
-                    if (urlString.startsWith('http') && urlString.includes(targetURL.host)) {
+                    // Abszolút URL-ek kezelése (ha a céloldalhoz tartozik)
+                    if (urlString.startsWith('http') && urlString.includes(originalTargetHost)) {
                         return proxyPrefix + encodeURIComponent(urlString);
                     }
                     
-                    // Más (külső) URL-eket érintetlenül hagyunk
                     return resource;
                 }
                 
@@ -158,7 +148,6 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
         </script>
     `;
 
-    // Injektálás a <head> elejére
     if ($('head').length) {
         $('head').prepend(clientSidePatch);
     } else {
@@ -181,19 +170,17 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
 
             if (originalUrl) {
                 
-                // Gyökér-relatív linkek kezelése (pl.: /css/style.css)
                 if (originalUrl.startsWith('/') && !originalUrl.startsWith('//')) {
                     const absoluteUrl = targetURL.origin + originalUrl;
-                    const proxiedUrl = `https://${proxyDomain}/proxy?url=${encodeURIComponent(absoluteUrl)}`;
+                    const proxiedUrl = proxyPrefix + encodeURIComponent(absoluteUrl);
                     $(element).attr(attribute, proxiedUrl);
                     return; 
                 }
 
-                // Abszolút linkek kezelése (ha a céloldal domainjére mutat)
                 const absoluteUrl = url.resolve(targetURL.href, originalUrl);
                 
                 if (absoluteUrl.startsWith('http') && absoluteUrl.includes(targetURL.host)) {
-                    const proxiedUrl = `https://${proxyDomain}/proxy?url=${encodeURIComponent(absoluteUrl)}`;
+                    const proxiedUrl = proxyPrefix + encodeURIComponent(absoluteUrl);
                     $(element).attr(attribute, proxiedUrl);
                 }
             }
@@ -204,10 +191,8 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
 }
 
 
-/**
- * Generálja az egyszerű kezdőoldalt.
- */
 function getHomePage(proxyDomain) {
+    // A kezdőoldal logikája változatlan
     return `
         <!DOCTYPE html>
         <html lang="hu">
@@ -262,10 +247,11 @@ app.all('*', async (req, res) => {
             return res.status(200).type('text/html').send(getHomePage(currentProxyDomain));
         }
 
-        // B) Stray Asset Átirányítás (ha egy kliens oldali forrás a gyökérhez viszonyítva kér valamit)
+        // B) Stray Asset Átirányítás (FIX android-chrome-144x144.png 404-re)
         const isStrayAsset = req.path.includes('/api/') || req.path.includes('/s/') || req.path.includes('/v1/') ||
                              req.path.endsWith('.js') || req.path.endsWith('.json') || 
-                             req.path.endsWith('.css') || req.path.endsWith('.m3u8');
+                             req.path.endsWith('.css') || req.path.endsWith('.m3u8') || 
+                             req.path.endsWith('.png') || req.path.endsWith('.ico') || req.path.endsWith('.webmanifest'); 
 
         if (req.path !== '/proxy' && req.headers['referer'] && isStrayAsset) {
             
@@ -274,7 +260,6 @@ app.all('*', async (req, res) => {
 
             try {
                 const referrerUrl = new URL(referrer);
-                // Csak akkor feltételezzük, hogy az eredeti forrásra vonatkozik, ha a referer a mi proxy domainünk
                 if (referrerUrl.hostname === currentProxyDomain) {
                     const originalUrlParam = referrerUrl.searchParams.get('url');
                     if (originalUrlParam) {
@@ -285,7 +270,6 @@ app.all('*', async (req, res) => {
             } catch(e) { /* Hiba figyelmen kívül hagyása */ }
             
             if (assumedTargetOrigin) {
-                // Relatív útvonalat abszolút URL-re konvertálunk és proxyn keresztül irányítjuk át
                 const absoluteTargetUrl = assumedTargetOrigin + req.path;
                 const correctProxyUrl = `/proxy?url=${encodeURIComponent(absoluteTargetUrl)}`;
                 
@@ -296,7 +280,25 @@ app.all('*', async (req, res) => {
         
         // C) A fő proxy logika: /proxy?url=...
         if (req.path === '/proxy' && req.query.url) {
-            targetURL = new URL(req.query.url);
+            let fullTargetUrl = req.query.url;
+            const proxyQueryKeys = Object.keys(req.query).filter(key => key !== 'url');
+
+            // KRITIKUS JAVÍTÁS (V4): Hozzáadjuk a proxyhoz küldött, de a céloldalnak szánt extra query paramétereket (pl. Tubi auth)
+            if (proxyQueryKeys.length > 0) {
+                const extraParams = new URLSearchParams();
+                proxyQueryKeys.forEach(key => {
+                    // Ezek a paraméterek a céloldal URL-jében maradtak, de az Express a proxy query-nek értelmezi.
+                    // Vissza kell fűzni a cél URL-re.
+                    extraParams.append(key, req.query[key]);
+                });
+                
+                // Hozzáadjuk a query paramétereket a cél URL-hez, a ? vagy & használatával
+                // Fontos: a req.query.url már tartalmazhat saját query paramétereket (benne a ? jellel)
+                fullTargetUrl += (fullTargetUrl.includes('?') ? '&' : '?') + extraParams.toString();
+            }
+            
+            targetURL = new URL(fullTargetUrl);
+            
         } else {
             if (!res.headersSent) {
                 return res.status(404).send('404 Not Found. Használja a /proxy?url=... formátumot.');
@@ -308,35 +310,32 @@ app.all('*', async (req, res) => {
 
         // --- PROXY KÉRÉS ELKÜLDÉSE (fetch) ---
 
-        // 🛑 KRITIKUS JAVÍTÁS: Fejlécek szűrése és beállítása
         const fetchHeaders = filterRequestHeaders(req.headers, targetURL.host);
         
-        // A kérés törzsének (body) kezelése
         const fetchOptions = {
             method: req.method,
             headers: fetchHeaders,
-            // Csak POST/PUT/PATCH kérés esetén küldjük a body-t
             body: ['GET', 'HEAD'].includes(req.method) ? undefined : req.body,
+            redirect: 'follow', 
+            timeout: 15000 
         };
         
         const response = await fetch(targetURL.href, fetchOptions);
 
         // --- VÁLASZ ELŐKÉSZÍTÉSE ÉS Továbbítás ---
 
-        // Válasz headerek szűrése és beállítása
         const newRespHeaders = new Headers(response.headers);
         const contentType = newRespHeaders.get('content-type') || ''; 
 
         // KRITIKUS FEJLÉCEK TÖRLÉSE ÉS KÖTELEZŐ CORS BEÁLLÍTÁS MINDEN VÁLASZ ESETÉN!
-        newRespHeaders.delete('content-encoding'); // Fontos, ha nem szeretnénk decompressálni a fetch-hel.
-        newRespHeaders.delete('content-security-policy'); // A böngésző tiltólistájának felülírása
+        newRespHeaders.delete('content-encoding'); 
+        newRespHeaders.delete('content-security-policy'); 
         newRespHeaders.delete('x-frame-options');
         newRespHeaders.delete('x-content-type-options'); 
-        newRespHeaders.delete('x-render-origin-server'); // Proxy adatok törlése a válaszból
+        newRespHeaders.delete('x-render-origin-server');
         newRespHeaders.delete('x-powered-by');
-        newRespHeaders.set('access-control-allow-origin', '*'); // Ezzel fixáljuk a CORS problémákat
+        newRespHeaders.set('access-control-allow-origin', '*'); 
 
-        // Minden más fejléceket másolunk
         newRespHeaders.forEach((value, name) => {
             if (name.toLowerCase() !== 'content-length' && 
                 !ALL_HEADERS_TO_STRIP.includes(name.toLowerCase())) { 
@@ -349,7 +348,6 @@ app.all('*', async (req, res) => {
             console.log(`Handling HTML for: ${targetURL.href}`);
             const htmlText = await response.text();
             
-            // Itt fut le a Roku document.domain eltávolítása is, és a statikus linkek cseréje
             const rewrittenHtml = rewriteHtmlContent(htmlText, targetURL, currentProxyDomain); 
             
             res.setHeader('Content-Type', 'text/html; charset=utf-8'); 
@@ -363,25 +361,25 @@ app.all('*', async (req, res) => {
             const proxiedOriginPrefix = `https://${currentProxyDomain}/proxy?url=`;
             let rewrittenContent = textContent;
 
-            // FIX 2: Tubi Fontok CORS-hiba javítása (aggresszív domain csere a forráskódon belül)
-            // Közvetlenül a CDN/API domaineket cseréljük proxizott linkre, hogy a JS/CSS-ben lévő hívások is átmenjenek a proxyn
-            if (targetURL.hostname.includes('tubitv.com')) {
-                const tubiDomains = [
-                    'https://md0.tubitv.com',
-                    'https://mcdn.tubitv.com',
+            // Aggresszív domain csere a forráskódon belül
+            if (targetURL.hostname.includes('tubitv.com') || targetURL.hostname.includes('roku.com')) {
+                const domainsToRewrite = [
+                    'https://md0.tubitv.com', 'https://mcdn.tubitv.com',
                     'https://account.production-public.tubi.io',
-                    'https://tensor-cdn.production-public.tubi.io'
+                    'https://tensor-cdn.production-public.tubi.io',
+                    targetURL.origin // Roku esetén az origin
                 ];
                 
-                tubiDomains.forEach(domain => {
-                    rewrittenContent = rewrittenContent.replaceAll(domain, proxiedOriginPrefix + encodeURIComponent(domain));
+                domainsToRewrite.forEach(domain => {
+                    // Cseréljük az eredeti domain nevét proxizott URL-re
+                    const encodedDomain = encodeURIComponent(domain);
+                    
+                    // MEGJEGYZÉS: Itt csak a domain-t cseréljük. A kliensoldali JS interceptor
+                    // felelős azért, hogy a végleges útvonalat (ami a cserélt URL után következik)
+                    // kiegészítse és a teljes URL-t encode-olja a végső proxy híváshoz.
+                    // Ez a stratégia optimálisabb, mint a teljes útvonal keresése.
+                    rewrittenContent = rewrittenContent.replaceAll(domain, proxiedOriginPrefix + encodedDomain);
                 });
-            }
-
-            // Roku asset domainek cseréje
-            if (targetURL.hostname.includes('roku.com')) {
-                 const targetOrigin = targetURL.origin;
-                 rewrittenContent = rewrittenContent.replaceAll(targetOrigin, proxiedOriginPrefix + targetOrigin);
             }
             
             res.setHeader('Content-Type', contentType); 
@@ -395,7 +393,6 @@ app.all('*', async (req, res) => {
             console.log(`Streaming ${contentType} for: ${targetURL.href}`);
             res.status(response.status);
             
-            // Válasz body streamelése a kliens felé
             response.body.pipe(res);
 
             response.body.on('error', (err) => {
@@ -407,11 +404,10 @@ app.all('*', async (req, res) => {
         }
 
     } catch (error) {
-        // Globális Hiba Kezelés (502-t ad vissza)
         console.error(`PROXY CRITICAL ERROR for ${req.url}:`, error.message);
         
         if (!res.headersSent) {
-             res.status(502).type('text/plain').send(`PROXY HÁLÓZATI VAGY BELSŐ HIBA (502): ${error.message}. Kérem, ellenőrizze a céloldal elérhetőségét.`);
+             res.status(502).type('text/plain').send(`PROXY HÁLÓZATI VAGY BELSŐ HIBA (502): ${error.message}.`);
         }
     }
 });
@@ -423,5 +419,5 @@ app.all('*', async (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Server listening on port ${PORT}`);
-    console.log(`Proxy domain feltételezve: ${currentProxyDomain}`);
+    console.log(`Proxy domain: ${currentProxyDomain}`);
 });
