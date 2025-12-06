@@ -43,7 +43,7 @@ app.use(express.raw({ type: '*/*', limit: MAX_BODY_SIZE }));
 // ===============================================
 
 /**
- * JAVÍTÁS 4: Megszűri a proxy felé érkező request headereket.
+ * Megszűri a proxy felé érkező request headereket.
  */
 function filterRequestHeaders(originalHeaders, targetURL) {
     const newHeaders = {};
@@ -71,7 +71,7 @@ function filterRequestHeaders(originalHeaders, targetURL) {
     newHeaders['Referer'] = targetURL.origin + '/'; 
 
     // Tubihoz is kellhet a kiegészítő Origin
-    if (targetHost.includes('tubitv.com') || targetHost.includes('roku.com')) {
+    if (targetHost.includes('tubitv.com') || targetHost.includes('roku.com') || targetHost.includes('tubi.io')) {
         newHeaders['Origin'] = targetURL.origin;
     }
 
@@ -79,7 +79,7 @@ function filterRequestHeaders(originalHeaders, targetURL) {
 }
 
 /**
- * JAVÍTÁS 1: Ellenőrzi és felülírja a Location headert, hogy az visszamutasson a proxyra.
+ * Ellenőrzi és felülírja a Location headert, hogy az visszamutasson a proxyra.
  */
 function rewriteLocationHeader(targetURL, responseHeaders, proxyDomain) {
     const locationHeader = responseHeaders.get('location');
@@ -105,6 +105,7 @@ function rewriteLocationHeader(targetURL, responseHeaders, proxyDomain) {
 
 /**
  * KRITIKUS JAVÍTÁS: Base Tag visszaállítása a relatív URL-ek feloldásához (Tubi font fix).
+ * ÚJ JAVÍTÁS: Bővített kliensoldali proxy logikát tartalmaz
  */
 function rewriteHtmlContent(html, targetURL, proxyDomain) {
     const originalTargetOrigin = targetURL.origin;
@@ -121,6 +122,19 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
 
     const proxyPrefix = `https://${proxyDomain}/proxy?url=`;
 
+    // 1. Kiterjesztett hoszt lista összeállítása a kliensoldali proxyzáshoz
+    let hostsToProxy = [originalTargetHost];
+
+    // Specifikus Tubi CDN/API hosztok hozzáadása, amelyek a konzolban hibaüzenetet okoztak
+    if (originalTargetHost.includes('tubitv.com')) {
+        hostsToProxy.push('tubitv.com');
+        hostsToProxy.push('md0.tubitv.com');
+        hostsToProxy.push('account.production-public.tubi.io');
+        hostsToProxy.push('tensor-cdn.production-public.tubi.io');
+    }
+
+    const hostsToProxyString = JSON.stringify(hostsToProxy); 
+
     // --- KRITIKUS JAVÍTÁS 2: <base> tag bevezetése (Visszaállítva a CSS relatív URL-ekhez) ---
     const baseTag = `<base href="${originalTargetOrigin}/">`;
     if ($('head').length) {
@@ -129,23 +143,33 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
         $('body').prepend(baseTag);
     }
     
-    // --- KRITIKUS JAVÍTÁS 3: Kliensoldali Hálózati Hívás Interceptor ---
+    // --- KRITIKUS JAVÍTÁS 3: Kliensoldali Hálózati Hívás Interceptor (BŐVÍTVE) ---
     const clientSidePatch = `
         <script>
             // Proxy Interceptor Script - Dinamikus hívások átirányítása
             (function() {
                 const currentProxyHost = '${proxyDomain}';
-                const originalTargetHost = '${originalTargetHost}';
+                const hostsToProxy = ${hostsToProxyString}; 
                 const proxyPrefix = 'https://' + currentProxyHost + '/proxy?url=';
+
+                function shouldProxy(hostname) {
+                    if (hostname === currentProxyHost) return false;
+                    
+                    // Ellenőrzi, hogy a hosztnév megegyezik-e a listában szereplő hosztnevek bármelyikével,
+                    // VAGY az eredeti hoszt sub-domainje
+                    for (const targetHost of hostsToProxy) {
+                        // Ellenőrzés: Pontos egyezés VAGY sub-domain egyezés
+                        if (hostname === targetHost || hostname.endsWith('.' + targetHost)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
 
                 function resolveAndProxy(resource) {
                     let urlString = resource;
                     if (typeof urlString !== 'string') {
                         return resource;
-                    }
-                    
-                    if (urlString.includes(currentProxyHost)) {
-                        return urlString;
                     }
                     
                     let absoluteUrl;
@@ -156,8 +180,8 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
                         return resource; 
                     }
 
-                    // Proxyzzuk az összes URL-t, ami a céloldalhoz vagy annak aldoménjéhez tartozik
-                    if (absoluteUrl.hostname.endsWith(originalTargetHost) || absoluteUrl.hostname === originalTargetHost) {
+                    // KRITIKUS ELLENŐRZÉS: Csak akkor proxyzálunk, ha a hoszt az általunk célzott hosztok egyike
+                    if (shouldProxy(absoluteUrl.hostname)) {
                         return proxyPrefix + encodeURIComponent(absoluteUrl.href);
                     }
                     
@@ -220,8 +244,8 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
                     try {
                         const absoluteUrl = new URL(originalUrl);
                         
-                        // Proxyzzuk az összes URL-t, ami a célhostot tartalmazza
-                        if (absoluteUrl.hostname.endsWith(originalTargetHost) || absoluteUrl.hostname === originalTargetHost) {
+                        // Proxyzzuk az összes URL-t, ami a célhostot tartalmazza VAGY a kiterjesztett listában van
+                        if (hostsToProxy.includes(absoluteUrl.hostname) || absoluteUrl.hostname.endsWith('.' + originalTargetHost)) {
                             proxiedUrl = proxyPrefix + encodeURIComponent(absoluteUrl.href);
                         }
                     } catch (e) {
@@ -249,7 +273,7 @@ function rewriteHtmlContent(html, targetURL, proxyDomain) {
 }
 
 /**
- * JAVÍTÁS 5: CSS tartalom átírása az URL-ek proxyzálására.
+ * CSS tartalom átírása az URL-ek proxyzálására.
  */
 function rewriteCssContent(cssText, targetURL, proxyDomain) {
     const targetOrigin = targetURL.origin;
@@ -311,7 +335,7 @@ function rewriteCssContent(cssText, targetURL, proxyDomain) {
 }
 
 /**
- * JAVÍTÁS 3: A kezdőlap stílusainak módosítása.
+ * A kezdőlap stílusainak módosítása.
  */
 function getHomePage(proxyDomain) {
     return `
@@ -486,7 +510,8 @@ app.all('*', async (req, res) => {
         const contentType = newRespHeaders.get('content-type') || ''; 
         
         // JAVÍTÁS 1: Átirányítási (Location) fejlécek felülírása
-        rewriteLocationHeader(targetURL, newRespHeaders, currentProxyDomain); // FIGYELEM: A korábbi szintaktikai hiba itt volt!
+        rewriteLocationHeader(targetURL, newRespHeaders, currentProxyDomain); 
+        
         // KRITIKUS FEJLÉCEK TÖRLÉSE ÉS KÖTELEZŐ CORS BEÁLLÍTÁS MINDEN VÁLASZ ESETÉN! (Tubi fix)
         newRespHeaders.delete('content-encoding'); 
         newRespHeaders.delete('content-security-policy'); 
